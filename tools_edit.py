@@ -1,0 +1,60 @@
+import os
+from pathlib import Path
+from typing import Dict, Any
+
+
+def edit_file_tool_def() -> dict:
+    return {
+        "name": "edit_file",
+        "description": (
+            "Make edits to a text file.\n"
+            "Replaces 'old_str' with 'new_str' in the given file. "
+            "'old_str' and 'new_str' MUST be different. "
+            "If the file does not exist and old_str == '', the file is created with new_str."
+        ),
+        "input_schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "path": {"type": "string", "description": "The path to the file"},
+                "old_str": {"type": "string", "description": "Exact text to replace (must match exactly)"},
+                "new_str": {"type": "string", "description": "Replacement text"},
+            },
+            "required": ["path", "old_str", "new_str"],
+        },
+    }
+
+
+def _create_new_file(file_path: str, content: str) -> str:
+    p = Path(file_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(content, encoding="utf-8")
+    return f"Successfully created file {file_path}"
+
+
+def edit_file_impl(input: Dict[str, Any]) -> str:
+    path = input.get("path", "")
+    old = input.get("old_str", None)
+    new = input.get("new_str", None)
+
+    if not path or old is None or new is None or old == new:
+        raise ValueError("invalid input parameters")
+
+    if not os.path.exists(path):
+        if old == "":
+            return _create_new_file(path, new)
+        raise FileNotFoundError(path)
+
+    content = Path(path).read_text(encoding="utf-8")
+    if old == "":
+        Path(path).write_text(new, encoding="utf-8")
+        return "OK"
+
+    new_content = content.replace(old, new)
+    if new_content == content:
+        raise ValueError("old_str not found in file")
+
+    Path(path).write_text(new_content, encoding="utf-8")
+    return "OK"
+
+
