@@ -1,4 +1,5 @@
 import sys
+import json
 from typing import Callable, Dict, Any, List
 from anthropic import Anthropic
 
@@ -55,8 +56,16 @@ def run_agent(tools: List["Tool"]) -> None:
                 tool_input = block.input
                 tool_use_id = block.id
 
+                # Log the tool invocation with full input
+                try:
+                    print(f"tool_use: {tool_name} input={json.dumps(tool_input, ensure_ascii=False)}")
+                except Exception:
+                    # Fallback if input isn't JSON-serializable as-is
+                    print(f"tool_use: {tool_name} input={tool_input}")
+
                 impl = next((t for t in tools if t.name == tool_name), None)
                 if impl is None:
+                    print(f"tool_use: {tool_name} error=tool not found")
                     tool_results_content.append(
                         {
                             "type": "tool_result",
@@ -68,6 +77,7 @@ def run_agent(tools: List["Tool"]) -> None:
                 else:
                     try:
                         result_str = impl.fn(tool_input)
+                        print(f"tool_use: {tool_name} result={result_str}")
                         tool_results_content.append(
                             {
                                 "type": "tool_result",
@@ -77,6 +87,7 @@ def run_agent(tools: List["Tool"]) -> None:
                             }
                         )
                     except Exception as e:
+                        print(f"tool_use: {tool_name} error={str(e)}")
                         tool_results_content.append(
                             {
                                 "type": "tool_result",
