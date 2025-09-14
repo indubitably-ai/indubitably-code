@@ -2,6 +2,7 @@ import sys
 import json
 from typing import Callable, Dict, Any, List
 from anthropic import Anthropic
+from pyfiglet import Figlet
 
 
 ToolFunc = Callable[[Dict[str, Any]], str]
@@ -18,8 +19,19 @@ class Tool:
 def run_agent(tools: List["Tool"]) -> None:
     client = Anthropic()
     conversation: List[Dict[str, Any]] = []
+    CYAN = "\033[96m"
+    RESET = "\033[0m"
+    figlet = Figlet(font="standard")
+    ascii_art = figlet.renderText("INDUBITABLY CODE")
+    art_lines = ascii_art.rstrip("\n").split("\n")
+    max_len = max((len(line) for line in art_lines), default=0)
+    horizontal_border = "+" + "=" * (max_len + 2) + "+"
 
-    print("Chat with Claude (ctrl-c to quit)")
+    print(CYAN + horizontal_border)
+    for line in art_lines:
+        print("| " + line.ljust(max_len) + " |")
+    print(horizontal_border + RESET)
+    print("Type your prompt and press Enter (ctrl-c to quit)\n")
     read_user = True
 
     while True:
