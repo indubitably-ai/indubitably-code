@@ -15,137 +15,178 @@
 +==============================================================+
 ```
 
-## Indubitably Code: Anthropic Agent + Minimal Chat (Python)
+## Indubitably Code: Anthropic Agent Toolkit
 
-This repo implements two entry points using the Anthropic Python SDK:
+A batteries-included playground for building with the Anthropic Messages API. Run a friendly
+assistant ("Samus") in interactive or headless modes, wire in a rich tool belt, capture audit
+trails, and even keep lightweight TODOs for your session.
 
-- Minimal non-agent chat loop (`main.py`)
-- Tool-enabled agent (`run.py`) with `read_file`, `list_files`, and `edit_file` tools
+### Highlights
+- Minimal chat loop (`main.py`) when you just want raw model responses.
+- Interactive agent (`run.py`) with colorized terminal UX, transcripts, and an extended toolset.
+- Headless CLI (`indubitably-agent`) for CI/batch workflows with policy controls and JSON output.
+- Comprehensive tools for filesystem edits, searches, shell execution, patch application, web lookups, and session planning.
 
-Model: `claude-3-7-sonnet-latest`.
+### Requirements
+1. Python 3.13+
+2. [`uv`](https://github.com/astral-sh/uv) package manager
+3. An Anthropic API key (`ANTHROPIC_API_KEY`)
 
-### Prerequisites
-
-1) Python 3.13+
-2) Install `uv` (fast Python package manager)
-
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-# or: pipx install uv
-```
-
-3) Sync environment (creates `.venv` by default) and export your API key
-
+### Setup
 ```bash
 uv sync
 export ANTHROPIC_API_KEY=your_key_here
+# optional overrides
+export ANTHROPIC_MODEL=claude-3-7-sonnet-latest
+export ANTHROPIC_MAX_TOKENS=2048
 ```
 
-### Non-agent chat (terminal loop)
+`uv sync` creates a `.venv/` alongside the project; activate it with `source .venv/bin/activate`
+if you prefer using `python` directly instead of `uv run`.
 
+---
+
+## Entry Points
+
+### Minimal non-agent loop
 ```bash
 uv run python main.py
-# type messages; press Ctrl+C to exit
 ```
+Type a message per line; press `Ctrl+C` to exit. The script replays the whole conversation each
+turn and simply prints text blocks.
 
-What it does:
-- Maintains a local `conversation` list and sends it each turn
-- Prints assistant text blocks
-
-### Agent chat with tools
-
-Tools included:
-- `read_file(path)`: returns file contents
-- `list_files(path?)`: lists files/dirs ("/" suffix for dirs), recursive from `path` or `.`
-- `edit_file(path, old_str, new_str)`: replace text; if file missing and `old_str==""`, creates file with `new_str`
-
-Run the agent:
-
+### Interactive agent with tools
 ```bash
 uv run python run.py
+# or: uv run python run.py --no-color --transcript logs/session.log
 ```
+Features:
+- ASCII banner and prompt hints for quick onboarding.
+- Configurable color output and optional transcript logging.
+- Tool call tracing: see inputs and results inline as the model works.
 
-Options for the interactive runner:
-
-- `--no-color` disables ANSI color output (useful when piping or on limited terminals)
-- `--transcript path.log` appends each turn and tool action to a log file for later review
-
-### Headless agent CLI
-
-Use the CLI when you need non-interactive runs (CI, Docker, scripting):
-
+### Headless CLI
 ```bash
 uv run indubitably-agent --prompt "Summarize today's changes" --max-turns 6 \
   --allowed-tools read_file,list_files --audit-log logs/audit.jsonl
 ```
+Why use it:
+- Deterministic runs in CI or Docker.
+- Policy controls: allowlist/denylist tools, stop on errors, or dry-run to preview calls.
+- Machine-readable `--json` summaries for pipelines.
 
-Key switches:
+---
 
-- `--prompt` / `--prompt-file`: initial user message (stdin supported when omitted)
-- `--allowed-tools` / `--blocked-tools`: whitelist or blacklist individual tools
-- `--dry-run`: plan the tool calls without executing them
-- `--exit-on-tool-error`: fail fast if any tool reports an error
-- `--audit-log` / `--changes-log`: persist JSONL audit records and touched files
-- `--json`: emit a machine-readable run summary for pipelines
+## Toolbelt Cheat Sheet
+The interactive and headless agents share the same default tools. Ask for them using natural
+language; the agent translates your request into the schema below.
 
-#### Config-driven runs
+- **`read_file`** (filesystem read)
+  - Slice files by byte ranges, line windows, or tail sections with configurable encoding/error handling.
+  - Example prompt: `show lines 40-120 from src/service.py` or `tail the last 50 lines of logs/server.log`.
+- **`list_files`** (filesystem inventory)
+  - Recursive by default with depth limits, glob filters, ignore patterns, and sorting by name/mtime/size.
+  - Example prompt: `list files under app/ matching **/*.tsx but skip node_modules`.
+- **`grep`** (regex content search)
+  - Walks the repo (respecting common ignore directories) and returns context, file lists, or counts.
+  - Example prompt: `find usages of re.compile with 2 lines of context`.
+- **`glob_file_search`** (fast filename lookup)
+  - Glob for files (`**/` is auto-prepended) and get the newest matches first.
+  - Example prompt: `locate all *.sql migrations`.
+- **`codebase_search`** (heuristic semantic search)
+  - Score files/snippets against a natural-language query, optionally scoped by directory or glob.
+  - Example prompt: `find code related to oauth token refresh logic`.
+- **`edit_file`** (text replacement & creation)
+  - Replace exact strings or write new files when `old_str` is empty; errors if a match is missing.
+  - Example prompt: `in config/settings.py replace DEBUG = True with DEBUG = False`.
+- **`apply_patch`** (V4A diff application)
+  - Apply structured Add/Update/Delete patches in one call; perfect for multi-line edits.
+  - Example prompt: `apply this diff to docs/changelog.md` followed by the patch block.
+- **`delete_file`** (safe removal)
+  - Deletes files (not directories) and reports if the target was absent.
+  - Example prompt: `delete the generated tmp/output.txt file`.
+- **`run_terminal_cmd`** (guarded shell execution)
+  - Runs commands in the configured shell; refuses obviously interactive binaries unless backgrounded.
+  - Background jobs stream to `run_logs/job-*.out.log` & `.err.log`.
+  - Example prompt: `run npm test -- --runInBand` or `run build.sh in the background`.
+- **`todo_write`** (session TODOs)
+  - Maintain `.session_todos.json`; merge or replace items with id/content/status fields.
+  - Example prompt: `record todos for the session: update docs (pending), ship release (in_progress)`.
+- **`web_search`** (best-effort SERP fetch)
+  - Queries DuckDuckGo with Bing/Wikipedia fallbacks and returns titles + URLs (no scraping of result pages).
+  - Example prompt: `search the web for django 5.1 release notes`.
 
-Provide defaults in a TOML file and override selectively via CLI:
+---
 
+## Headless Runs in Depth
+
+### Common flag combinations
+- `--max-turns N` – cap Anthropic responses (default 8 turns).
+- `--exit-on-tool-error` – stop immediately if any tool reports an error.
+- `--dry-run` – skip execution and return `tool_result` stubs noting the skip.
+- `--allowed-tools` / `--blocked-tools` – comma-separated allowlist/denylist.
+- `--audit-log path.jsonl` – append every tool invocation as JSON.
+- `--changes-log path.jsonl` – track filesystem writes (successful or attempted) for auditing.
+- `--json` – emit a structured summary; `--verbose` adds stderr progress updates.
+
+Example (previewing a run for CI):
+```bash
+uv run indubitably-agent --prompt-file prompts/daily.md \
+  --config examples/headless-runner.toml \
+  --dry-run --json > run-plan.json
+```
+Dry runs still record planned tool calls in the audit log and mark them as `skipped`.
+
+### Runner config files
+Store defaults in TOML and override selectively on the CLI:
 ```toml
 # examples/headless-runner.toml
 [runner]
 max_turns = 6
 exit_on_tool_error = true
-allowed_tools = ["read_file", "list_files", "grep"]
+dry_run = false
+allowed_tools = ["read_file", "grep", "codebase_search", "todo_write"]
 audit_log = "logs/audit.jsonl"
 changes_log = "logs/changes.jsonl"
 ```
+Relative paths resolve from the config file location, making it easy to mount a directory in Docker
+or CI and collect artifacts.
 
-Run with:
+---
 
-```bash
-uv run indubitably-agent --config examples/headless-runner.toml --prompt-file prompt.md
-```
+## Logs, Artifacts, and State
+- **Transcripts**: `run.py --transcript path.log` appends the banner, prompts, tool calls, and responses.
+- **Audit log**: each tool event includes turn number, input payload, result string, and paths touched.
+- **Change log**: when writing tools succeed (or even attempt writes), their target paths are recorded.
+- **Background commands**: look under `run_logs/` for stdout/stderr captured by `run_terminal_cmd`.
+- **Session TODOs**: `.session_todos.json` keeps the most recent list written by `todo_write` with timestamps.
 
-Relative log paths resolve against the config file location so you can mount a bind volume in Docker/CI and collect artifacts.
+---
 
-#### Docker usage
-
-Build a container with the bundled `Dockerfile` and run the headless agent in pipelines:
-
+## Docker usage
 ```bash
 docker build -t indubitably-agent .
 docker run --rm -e ANTHROPIC_API_KEY=sk-... \
   -v "$PWD/logs:/out" indubitably-agent \
-  --config examples/headless-runner.toml --audit-log /out/audit.jsonl \
-  --prompt "Summarize latest commits"
+  --config examples/headless-runner.toml \
+  --prompt "Summarize latest commits" \
+  --audit-log /out/audit.jsonl
 ```
+The image uses `uv sync` during build and exposes the `indubitably-agent` entrypoint. Mount a volume
+for logs or change outputs as needed.
 
-The image installs dependencies with `uv sync` and exposes the `indubitably-agent` entrypoint, making it easy to script non-interactive tasks.
+---
 
-Try these:
-
-```text
+## Try it out
+```
 what do you see in this directory?
-what's in main.py?
-hey claude, create fizzbuzz.js that I can run with Node.js and that has fizzbuzz in it and executes it
-please edit fizzbuzz.js so that it only prints until 15
+search the codebase for "AgentRunner"
+apply this patch to README.md
+run pytest -q
+log a todo: add usage examples to docs
+search the web for python 3.13.1 release notes
 ```
+The agent will chain tool calls, stream results, and provide a concise wrap-up when it can. If you
+need hallucination-free runs, favor `--dry-run` to inspect planned actions before letting Samus loose.
 
-How it works:
-- The model may emit `tool_use` blocks.
-- The app dispatches locally, returns `tool_result` blocks as a user message, and continues the loop.
-
-### Notes
-
-- You can swap model id by editing `model=` in `main.py` and `agent.py`.
-- `uv sync` will create and manage a local virtual environment and install dependencies from `pyproject.toml`/`uv.lock`.
-- To activate the virtualenv for the current shell (optional):
-
-```bash
-source .venv/bin/activate
-# then run:
-python main.py
-python run.py
-```
+Happy hacking!
