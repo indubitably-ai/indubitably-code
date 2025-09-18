@@ -1,3 +1,20 @@
+```text
++==============================================================+
+|  ___ _   _ ____  _   _ ____ ___ _____  _    ____  _  __   __ |
+| |_ _| \ | |  _ \| | | | __ )_ _|_   _|/ \  | __ )| | \ \ / / |
+|  | ||  \| | | | | | | |  _ \| |  | | / _ \ |  _ \| |  \ V /  |
+|  | || |\  | |_| | |_| | |_) | |  | |/ ___ \| |_) | |___| |   |
+| |___|_| \_|____/ \___/|____/___| |_/_/   \_\____/|_____|_|   |
+|                                                              |
+|   ____ ___  ____  _____                                      |
+|  / ___/ _ \|  _ \| ____|                                     |
+| | |  | | | | | | |  _|                                       |
+| | |__| |_| | |_| | |___                                      |
+|  \____\___/|____/|_____|                                     |
+|                                                              |
++==============================================================+
+```
+
 ## Indubitably Code: Anthropic Agent + Minimal Chat (Python)
 
 This repo implements two entry points using the Anthropic Python SDK:
@@ -48,6 +65,65 @@ Run the agent:
 uv run python run.py
 ```
 
+Options for the interactive runner:
+
+- `--no-color` disables ANSI color output (useful when piping or on limited terminals)
+- `--transcript path.log` appends each turn and tool action to a log file for later review
+
+### Headless agent CLI
+
+Use the CLI when you need non-interactive runs (CI, Docker, scripting):
+
+```bash
+uv run indubitably-agent --prompt "Summarize today's changes" --max-turns 6 \
+  --allowed-tools read_file,list_files --audit-log logs/audit.jsonl
+```
+
+Key switches:
+
+- `--prompt` / `--prompt-file`: initial user message (stdin supported when omitted)
+- `--allowed-tools` / `--blocked-tools`: whitelist or blacklist individual tools
+- `--dry-run`: plan the tool calls without executing them
+- `--exit-on-tool-error`: fail fast if any tool reports an error
+- `--audit-log` / `--changes-log`: persist JSONL audit records and touched files
+- `--json`: emit a machine-readable run summary for pipelines
+
+#### Config-driven runs
+
+Provide defaults in a TOML file and override selectively via CLI:
+
+```toml
+# examples/headless-runner.toml
+[runner]
+max_turns = 6
+exit_on_tool_error = true
+allowed_tools = ["read_file", "list_files", "grep"]
+audit_log = "logs/audit.jsonl"
+changes_log = "logs/changes.jsonl"
+```
+
+Run with:
+
+```bash
+uv run indubitably-agent --config examples/headless-runner.toml --prompt-file prompt.md
+```
+
+Relative log paths resolve against the config file location so you can mount a bind volume in Docker/CI and collect artifacts.
+
+#### Docker usage
+
+Build a container with the bundled `Dockerfile` and run the headless agent in pipelines:
+
+```bash
+docker build -t indubitably-agent .
+docker run --rm -e ANTHROPIC_API_KEY=sk-... \
+  -v "$PWD/logs:/out" indubitably-agent \
+  --config examples/headless-runner.toml --audit-log /out/audit.jsonl \
+  --prompt "Summarize latest commits"
+```
+
+The image installs dependencies with `uv sync` and exposes the `indubitably-agent` entrypoint, making it easy to script non-interactive tasks.
+
 Try these:
 
 ```text
@@ -73,5 +149,3 @@ source .venv/bin/activate
 python main.py
 python run.py
 ```
-
-

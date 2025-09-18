@@ -12,20 +12,44 @@ from tools_web_search import web_search_tool_def, web_search_impl
 from tools_todo_write import todo_write_tool_def, todo_write_impl
 
 
-if __name__ == "__main__":
-    tools = [
-        Tool(**read_file_tool_def(), fn=read_file_impl),
-        Tool(**list_files_tool_def(), fn=list_files_impl),
-        Tool(**edit_file_tool_def(), fn=edit_file_impl),
-        Tool(**grep_tool_def(), fn=grep_impl),
-        Tool(**run_terminal_cmd_tool_def(), fn=run_terminal_cmd_impl),
-        Tool(**glob_file_search_tool_def(), fn=glob_file_search_impl),
-        Tool(**codebase_search_tool_def(), fn=codebase_search_impl),
-        Tool(**apply_patch_tool_def(), fn=apply_patch_impl),
-        Tool(**delete_file_tool_def(), fn=delete_file_impl),
-        Tool(**web_search_tool_def(), fn=web_search_impl),
-        Tool(**todo_write_tool_def(), fn=todo_write_impl),
+def build_default_tools() -> list[Tool]:
+    return [
+        Tool(**read_file_tool_def(), fn=read_file_impl, capabilities={"read_fs"}),
+        Tool(**list_files_tool_def(), fn=list_files_impl, capabilities={"read_fs"}),
+        Tool(**edit_file_tool_def(), fn=edit_file_impl, capabilities={"write_fs"}),
+        Tool(**grep_tool_def(), fn=grep_impl, capabilities={"read_fs"}),
+        Tool(
+            **run_terminal_cmd_tool_def(),
+            fn=run_terminal_cmd_impl,
+            capabilities={"exec_shell"},
+        ),
+        Tool(**glob_file_search_tool_def(), fn=glob_file_search_impl, capabilities={"read_fs"}),
+        Tool(
+            **codebase_search_tool_def(),
+            fn=codebase_search_impl,
+            capabilities={"read_fs"},
+        ),
+        Tool(**apply_patch_tool_def(), fn=apply_patch_impl, capabilities={"write_fs"}),
+        Tool(**delete_file_tool_def(), fn=delete_file_impl, capabilities={"write_fs"}),
+        Tool(**web_search_tool_def(), fn=web_search_impl, capabilities={"network"}),
+        Tool(**todo_write_tool_def(), fn=todo_write_impl, capabilities={"write_fs"}),
     ]
-    run_agent(tools)
 
 
+def main() -> None:
+    from argparse import ArgumentParser
+
+    parser = ArgumentParser(description="Run the interactive Indubitably agent")
+    parser.add_argument("--no-color", action="store_true", help="Disable ANSI color output")
+    parser.add_argument("--transcript", help="Optional path to append a conversation transcript")
+    args = parser.parse_args()
+
+    run_agent(
+        build_default_tools(),
+        use_color=not args.no_color,
+        transcript_path=args.transcript,
+    )
+
+
+if __name__ == "__main__":
+    main()

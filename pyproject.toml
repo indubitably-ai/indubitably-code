@@ -7,4 +7,37 @@ requires-python = ">=3.13"
 dependencies = [
     "anthropic>=0.67.0",
     "pyfiglet>=1.0.2",
+    "pytest>=8.3",
+]
+
+[project.scripts]
+indubitably-agent = "cli:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = [
+    "agent",
+    "agent_runner",
+    "cli",
+    "config",
+    "main",
+    "run",
+    "runner_config",
+    "tools_apply_patch",
+    "tools_codebase_search",
+    "tools_delete_file",
+    "tools_edit",
+    "tools_glob_file_search",
+    "tools_grep",
+    "tools_list",
+    "tools_read",
+    "tools_run_terminal_cmd",
+    "tools_todo_write",
+    "tools_web_search",
 ]

@@ -1,0 +1,14 @@
+# Example configuration for running the headless agent in CI/Docker.
+[runner]
+# End the run after at most this many assistant responses.
+max_turns = 6
+
+# Fail the session immediately if any tool reports an error.
+exit_on_tool_error = true
+
+# Restrict tool usage to read-only operations by default.
+allowed_tools = ["read_file", "list_files", "grep", "glob_file_search", "codebase_search"]
+
+# Persist structured audit logs relative to this config file.
+audit_log = "logs/audit.jsonl"
+changes_log = "logs/changes.jsonl"

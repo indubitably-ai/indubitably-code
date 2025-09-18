@@ -1,83 +1,121 @@
+"""Interactive Anthropic agent with tool support for local development."""
+
 import sys
 import json
-from typing import Callable, Dict, Any, List
+import re
+import textwrap
+from typing import Callable, Dict, Any, List, Iterable, Optional, Set
 from anthropic import Anthropic
 from pyfiglet import Figlet
+
+from config import load_anthropic_config
 
 
 ToolFunc = Callable[[Dict[str, Any]], str]
 
 
 class Tool:
-    def __init__(self, name: str, description: str, input_schema: Dict[str, Any], fn: ToolFunc):
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        input_schema: Dict[str, Any],
+        fn: ToolFunc,
+        *,
+        capabilities: Optional[Iterable[str]] = None,
+    ):
         self.name = name
         self.description = description
         self.input_schema = input_schema
         self.fn = fn
+        self.capabilities: Set[str] = set(capabilities or [])
+
+    def to_definition(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "input_schema": self.input_schema,
+        }
 
 
-def run_agent(tools: List["Tool"]) -> None:
+def run_agent(
+    tools: List["Tool"],
+    *,
+    use_color: bool = True,
+    transcript_path: Optional[str] = None,
+) -> None:
+    config = load_anthropic_config()
     client = Anthropic()
     conversation: List[Dict[str, Any]] = []
-    CYAN = "\033[96m"
-    RESET = "\033[0m"
+    CYAN = "\033[96m" if use_color else ""
+    GREEN = "\033[92m" if use_color else ""
+    YELLOW = "\033[93m" if use_color else ""
+    RED = "\033[91m" if use_color else ""
+    BOLD = "\033[1m" if use_color else ""
+    DIM = "\033[2m" if use_color else ""
+    RESET = "\033[0m" if use_color else ""
     figlet = Figlet(font="standard")
     ascii_art = figlet.renderText("INDUBITABLY CODE")
     art_lines = ascii_art.rstrip("\n").split("\n")
     max_len = max((len(line) for line in art_lines), default=0)
     horizontal_border = "+" + "=" * (max_len + 2) + "+"
 
-    print(CYAN + horizontal_border)
+    _print_transcript(transcript_path, ascii_art)
+
+    print(CYAN + horizontal_border + RESET if use_color else horizontal_border)
     for line in art_lines:
-        print("| " + line.ljust(max_len) + " |")
-    print(horizontal_border + RESET)
+        if use_color:
+            print(CYAN + "| " + line.ljust(max_len) + " |" + RESET)
+        else:
+            print("| " + line.ljust(max_len) + " |")
+    print((CYAN + horizontal_border + RESET) if use_color else horizontal_border)
     print("Type your prompt and press Enter (ctrl-c to quit)\n")
     read_user = True
 
     while True:
         if read_user:
+            _print_prompt_menu(DIM, RESET)
+            print(f"{BOLD}You ▸ {RESET}", end="", flush=True)
             line = sys.stdin.readline()
             if not line:
                 break
             conversation.append({"role": "user", "content": [{"type": "text", "text": line.rstrip('\n')}]})
+            _print_transcript(transcript_path, f"USER: {line.rstrip('\n')}")
 
-        tool_defs = [
-            {
-                "name": t.name,
-                "description": t.description,
-                "input_schema": t.input_schema,
-            }
-            for t in tools
-        ]
+        tool_defs = [t.to_definition() for t in tools]
 
-        msg = client.messages.create(
-            model="claude-3-7-sonnet-latest",
-            max_tokens=1024,
-            messages=conversation,
-            tools=tool_defs,
-        )
+        try:
+            msg = client.messages.create(
+                model=config.model,
+                max_tokens=config.max_tokens,
+                messages=conversation,
+                tools=tool_defs,
+            )
+        except Exception as exc:  # pragma: no cover - surfaced to user
+            print(f"Anthropic error: {exc}", file=sys.stderr)
+            if conversation and conversation[-1].get("role") == "user":
+                conversation.pop()
+            read_user = True
+            continue
 
         conversation.append({"role": "assistant", "content": msg.content})
 
         tool_results_content: List[Dict[str, Any]] = []
         for block in msg.content:
             if block.type == "text":
-                print(f"Claude: {block.text}")
+                _print_assistant_text(block.text, GREEN, RESET)
+                _print_transcript(transcript_path, f"SAMUS: {block.text}")
             elif block.type == "tool_use":
                 tool_name = block.name
                 tool_input = block.input
                 tool_use_id = block.id
 
-                # Log the tool invocation with full input
-                try:
-                    print(f"tool_use: {tool_name} input={json.dumps(tool_input, ensure_ascii=False)}")
-                except Exception:
-                    # Fallback if input isn't JSON-serializable as-is
-                    print(f"tool_use: {tool_name} input={tool_input}")
+                _print_tool_invocation(tool_name, tool_input, CYAN, YELLOW, RESET)
 
                 impl = next((t for t in tools if t.name == tool_name), None)
                 if impl is None:
-                    print(f"tool_use: {tool_name} error=tool not found")
+                    print(f"{RED}  ↳ error: tool not found{RESET}")
+                    _print_transcript(transcript_path, f"TOOL {tool_name} ERROR: not found")
                     tool_results_content.append(
                         {
                             "type": "tool_result",
@@ -89,7 +127,8 @@ def run_agent(tools: List["Tool"]) -> None:
                 else:
                     try:
                         result_str = impl.fn(tool_input)
-                        print(f"tool_use: {tool_name} result={result_str}")
+                        _print_tool_result(result_str, False, GREEN, RESET)
+                        _print_transcript(transcript_path, f"TOOL {tool_name} RESULT: {result_str}")
                         tool_results_content.append(
                             {
                                 "type": "tool_result",
@@ -99,7 +138,8 @@ def run_agent(tools: List["Tool"]) -> None:
                             }
                         )
                     except Exception as e:
-                        print(f"tool_use: {tool_name} error={str(e)}")
+                        _print_tool_result(str(e), True, RED, RESET)
+                        _print_transcript(transcript_path, f"TOOL {tool_name} ERROR: {e}")
                         tool_results_content.append(
                             {
                                 "type": "tool_result",
@@ -117,3 +157,63 @@ def run_agent(tools: List["Tool"]) -> None:
         read_user = False
 
 
+def _print_assistant_text(text: str, color: str, reset: str, width: int = 80) -> None:
+    if not text:
+        return
+    formatted = _format_assistant_text(text, width=width)
+    print(f"{color}Samus ▸{reset}\n{formatted}\n")
+
+
+def _print_tool_invocation(name: str, payload: Any, label_color: str, key_color: str, reset: str) -> None:
+    print(f"{label_color}⚙️  Tool ▸ {name}{reset}")
+    if isinstance(payload, dict) and payload:
+        for key, value in payload.items():
+            if isinstance(value, (dict, list)):
+                rendered = json.dumps(value, ensure_ascii=False)
+            else:
+                rendered = str(value)
+            print(f"  {key_color}{key}{reset}: {rendered}")
+
+
+def _print_tool_result(message: str, is_error: bool, color: str, reset: str, width: int = 78) -> None:
+    prefix = "error" if is_error else "result"
+    wrapped = textwrap.fill(message, width=width)
+    print(f"{color}  ↳ {prefix}:{reset} {wrapped}")
+
+
+def _print_transcript(path: Optional[str], line: str) -> None:
+    if not path or not line:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(line.rstrip("\n") + "\n")
+    except Exception:
+        return
+
+
+def _format_assistant_text(text: str, width: int = 80) -> str:
+    lines: List[str] = []
+    for raw_paragraph in text.split("\n"):
+        paragraph = raw_paragraph.strip()
+        if not paragraph:
+            lines.append("")
+            continue
+        bullet_match = re.match(r"^(\d+\.|[-*•])\s+(.*)", paragraph)
+        if bullet_match:
+            prefix, body = bullet_match.groups()
+            indent = " " * (len(prefix) + 1)
+            wrapped = textwrap.fill(
+                body,
+                width=width,
+                initial_indent=f"{prefix} ",
+                subsequent_indent=indent,
+            )
+        else:
+            wrapped = textwrap.fill(paragraph, width=width)
+        lines.append(wrapped)
+    return "\n".join(lines).rstrip()
+
+
+def _print_prompt_menu(dim: str, reset: str) -> None:
+    menu = f"{dim}Send ↵  •  Quit Ctrl+C{reset}" if dim or reset else "Send ↵  •  Quit Ctrl+C"
+    print(menu)
