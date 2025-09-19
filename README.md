@@ -113,12 +113,39 @@ language; the agent translates your request into the schema below.
   - Runs commands in the configured shell; refuses obviously interactive binaries unless backgrounded.
   - Background jobs stream to `run_logs/job-*.out.log` & `.err.log`.
   - Example prompt: `run npm test -- --runInBand` or `run build.sh in the background`.
+- **`aws_api_mcp`** (structured AWS CLI access)
+  - Wraps the `aws` CLI with schema-validated inputs for read-focused operations.
+  - Supports selecting service/operation, profile & region overrides, JSON-encoded parameters, and pager suppression.
+  - Example prompt: `fetch the last 50 events from CloudWatch log group /aws/lambda/payment-handler in us-west-2`.
 - **`todo_write`** (session TODOs)
   - Maintain `.session_todos.json`; merge or replace items with id/content/status fields.
   - Example prompt: `record todos for the session: update docs (pending), ship release (in_progress)`.
 - **`web_search`** (best-effort SERP fetch)
   - Queries DuckDuckGo with Bing/Wikipedia fallbacks and returns titles + URLs (no scraping of result pages).
   - Example prompt: `search the web for django 5.1 release notes`.
+
+---
+
+## Asking for AWS Data in Plain Language
+The `aws_api_mcp` tool is automatically available to the agent, so you can stay conversational and
+let the model translate your intent into the structured AWS CLI call.
+
+Steps:
+1. Tell the agent what you need, plus any specifics (service, resource names, region, limits).
+2. The agent will decide to invoke `aws_api_mcp` with the right parameters and return the CLI output.
+3. Follow up with refinements (e.g., change `limit`, add time filters) the same way you would in a chat.
+
+Example dialogue:
+```text
+You ▸ Pull the last 25 CloudWatch log events for the Lambda payment-handler in us-west-2.
+Samus ▸ (calls aws_api_mcp → `logs filter-log-events --log-group-name /aws/lambda/payment-handler --limit 25 --region us-west-2`)
+Samus ▸ (returns pretty-printed JSON log events)
+```
+
+To customize further, mention parameters like `start-time`, specific log stream names, or even switch
+services (for example, "Describe the current Lambda configuration" or "List the DynamoDB tables in
+production"). The agent routes each request through the tool without requiring you to remember the
+AWS CLI syntax.
 
 ---
 

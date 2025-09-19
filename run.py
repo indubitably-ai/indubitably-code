@@ -10,6 +10,7 @@ from tools_apply_patch import apply_patch_tool_def, apply_patch_impl
 from tools_delete_file import delete_file_tool_def, delete_file_impl
 from tools_web_search import web_search_tool_def, web_search_impl
 from tools_todo_write import todo_write_tool_def, todo_write_impl
+from tools_aws_api_mcp import aws_api_mcp_tool_def, aws_api_mcp_impl
 
 
 def build_default_tools() -> list[Tool]:
@@ -33,6 +34,11 @@ def build_default_tools() -> list[Tool]:
         Tool(**delete_file_tool_def(), fn=delete_file_impl, capabilities={"write_fs"}),
         Tool(**web_search_tool_def(), fn=web_search_impl, capabilities={"network"}),
         Tool(**todo_write_tool_def(), fn=todo_write_impl, capabilities={"write_fs"}),
+        Tool(
+            **aws_api_mcp_tool_def(),
+            fn=aws_api_mcp_impl,
+            capabilities={"exec_shell"},
+        ),
     ]
 
 
