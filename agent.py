@@ -4,6 +4,7 @@ import sys
 import json
 import re
 import textwrap
+from pathlib import Path
 from typing import Callable, Dict, Any, List, Iterable, Optional, Set
 from anthropic import Anthropic
 from pyfiglet import Figlet
@@ -43,10 +44,14 @@ def run_agent(
     *,
     use_color: bool = True,
     transcript_path: Optional[str] = None,
+    debug_tool_use: bool = False,
+    tool_debug_log_path: Optional[str] = None,
 ) -> None:
     config = load_anthropic_config()
     client = Anthropic()
     conversation: List[Dict[str, Any]] = []
+    debug_log_path = Path(tool_debug_log_path).expanduser().resolve() if tool_debug_log_path else None
+    tool_event_counter = 0
     CYAN = "\033[96m" if use_color else ""
     GREEN = "\033[92m" if use_color else ""
     YELLOW = "\033[93m" if use_color else ""
@@ -110,11 +115,18 @@ def run_agent(
                 tool_input = block.input
                 tool_use_id = block.id
 
-                _print_tool_invocation(tool_name, tool_input, CYAN, YELLOW, RESET)
+                _print_tool_invocation(
+                    tool_name,
+                    tool_input,
+                    CYAN,
+                    YELLOW,
+                    RESET,
+                    verbose=debug_tool_use,
+                )
 
                 impl = next((t for t in tools if t.name == tool_name), None)
                 if impl is None:
-                    print(f"{RED}  ↳ error: tool not found{RESET}")
+                    _print_tool_result("tool not found", True, RED, RESET, verbose=debug_tool_use)
                     _print_transcript(transcript_path, f"TOOL {tool_name} ERROR: not found")
                     tool_results_content.append(
                         {
@@ -124,10 +136,20 @@ def run_agent(
                             "is_error": True,
                         }
                     )
+                    _record_tool_debug_event(
+                        debug_tool_use,
+                        debug_log_path,
+                        turn=tool_event_counter + 1,
+                        tool_name=tool_name,
+                        payload=tool_input,
+                        result="tool not found",
+                        is_error=True,
+                        skipped=False,
+                    )
                 else:
                     try:
                         result_str = impl.fn(tool_input)
-                        _print_tool_result(result_str, False, GREEN, RESET)
+                        _print_tool_result(result_str, False, GREEN, RESET, verbose=debug_tool_use)
                         _print_transcript(transcript_path, f"TOOL {tool_name} RESULT: {result_str}")
                         tool_results_content.append(
                             {
@@ -137,8 +159,18 @@ def run_agent(
                                 "is_error": False,
                             }
                         )
+                        _record_tool_debug_event(
+                            debug_tool_use,
+                            debug_log_path,
+                            turn=tool_event_counter + 1,
+                            tool_name=tool_name,
+                            payload=tool_input,
+                            result=result_str,
+                            is_error=False,
+                            skipped=False,
+                        )
                     except Exception as e:
-                        _print_tool_result(str(e), True, RED, RESET)
+                        _print_tool_result(str(e), True, RED, RESET, verbose=debug_tool_use)
                         _print_transcript(transcript_path, f"TOOL {tool_name} ERROR: {e}")
                         tool_results_content.append(
                             {
@@ -148,6 +180,18 @@ def run_agent(
                                 "is_error": True,
                             }
                         )
+                        _record_tool_debug_event(
+                            debug_tool_use,
+                            debug_log_path,
+                            turn=tool_event_counter + 1,
+                            tool_name=tool_name,
+                            payload=tool_input,
+                            result=str(e),
+                            is_error=True,
+                            skipped=False,
+                        )
+
+                tool_event_counter += 1
 
         if not tool_results_content:
             read_user = True
@@ -164,8 +208,18 @@ def _print_assistant_text(text: str, color: str, reset: str, width: int = 80) ->
     print(f"{color}Samus ▸{reset}\n{formatted}\n")
 
 
-def _print_tool_invocation(name: str, payload: Any, label_color: str, key_color: str, reset: str) -> None:
+def _print_tool_invocation(
+    name: str,
+    payload: Any,
+    label_color: str,
+    key_color: str,
+    reset: str,
+    *,
+    verbose: bool,
+) -> None:
     print(f"{label_color}⚙️  Tool ▸ {name}{reset}")
+    if not verbose:
+        return
     if isinstance(payload, dict) and payload:
         for key, value in payload.items():
             if isinstance(value, (dict, list)):
@@ -175,7 +229,17 @@ def _print_tool_invocation(name: str, payload: Any, label_color: str, key_color:
             print(f"  {key_color}{key}{reset}: {rendered}")
 
 
-def _print_tool_result(message: str, is_error: bool, color: str, reset: str, width: int = 78) -> None:
+def _print_tool_result(
+    message: str,
+    is_error: bool,
+    color: str,
+    reset: str,
+    *,
+    verbose: bool,
+    width: int = 78,
+) -> None:
+    if not verbose and not is_error:
+        return
     prefix = "error" if is_error else "result"
     wrapped = textwrap.fill(message, width=width)
     print(f"{color}  ↳ {prefix}:{reset} {wrapped}")
@@ -189,6 +253,59 @@ def _print_transcript(path: Optional[str], line: str) -> None:
             fh.write(line.rstrip("\n") + "\n")
     except Exception:
         return
+
+
+def _record_tool_debug_event(
+    enabled: bool,
+    log_path: Optional[Path],
+    *,
+    turn: int,
+    tool_name: str,
+    payload: Any,
+    result: str,
+    is_error: bool,
+    skipped: bool,
+) -> None:
+    if not enabled:
+        return
+    event = {
+        "turn": turn,
+        "tool": tool_name,
+        "input": _jsonable(payload),
+        "result": result,
+        "is_error": is_error,
+        "skipped": skipped,
+        "paths": _extract_paths(payload),
+    }
+    if log_path:
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(event, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+
+def _jsonable(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_jsonable(v) for v in value]
+    if isinstance(value, Path):
+        return str(value)
+    return value
+
+
+def _extract_paths(input_payload: Any) -> List[str]:
+    if not isinstance(input_payload, dict):
+        return []
+    keys = ["path", "file_path", "target", "destination"]
+    paths: List[str] = []
+    for key in keys:
+        val = input_payload.get(key)
+        if isinstance(val, str):
+            paths.append(val)
+    return paths
 
 
 def _format_assistant_text(text: str, width: int = 80) -> str:

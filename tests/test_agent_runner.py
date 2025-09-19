@@ -118,3 +118,28 @@ def test_agent_runner_dry_run_skips_execution():
     assert event.is_error is True
     assert "dry-run" in event.result
     assert result.edited_files == ["draft.txt"]
+
+
+def test_agent_runner_tool_debug_logging(tmp_path, capsys):
+    tool = _make_tool(name="logger", capabilities={"write_fs"})
+    responses = [
+        [SimpleNamespace(type="tool_use", name=tool.name, input={"path": "notes.txt"}, id="tool-1")],
+        [SimpleNamespace(type="text", text="done")],
+    ]
+    client = SequencedClient(responses)
+
+    debug_path = tmp_path / "tool-debug.jsonl"
+    options = AgentRunOptions(debug_tool_use=True, tool_debug_log_path=debug_path)
+    runner = AgentRunner([tool], options, client=client)
+
+    runner.run("Prompt")
+
+    captured = capsys.readouterr()
+    assert "[tool-debug]" in captured.err
+
+    contents = debug_path.read_text(encoding="utf-8").strip().splitlines()
+    assert contents
+    payload = json.loads(contents[0])
+    assert payload["tool"] == tool.name
+    assert payload["input"]["path"] == "notes.txt"
+    assert payload["is_error"] is False

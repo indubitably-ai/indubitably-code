@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set
@@ -44,6 +45,8 @@ class AgentRunOptions:
     audit_log_path: Optional[Path] = None
     changes_log_path: Optional[Path] = None
     verbose: bool = False
+    debug_tool_use: bool = False
+    tool_debug_log_path: Optional[Path] = None
 
 
 @dataclass
@@ -199,6 +202,7 @@ class AgentRunner:
         )
         self.tool_events.append(event)
         self._write_audit_event(event)
+        self._handle_tool_debug(event)
 
         tool_result = {
             "type": "tool_result",
@@ -209,11 +213,29 @@ class AgentRunner:
 
         return event, tool_result
 
+    def _handle_tool_debug(self, event: ToolEvent) -> None:
+        if not self.options.debug_tool_use:
+            return
+        status = "skipped" if event.skipped else ("error" if event.is_error else "ok")
+        payload = json.dumps(_jsonable(event.raw_input), ensure_ascii=False)
+        print(
+            f"[tool-debug] turn={event.turn} tool={event.tool_name} status={status} input={payload}",
+            file=sys.stderr,
+        )
+        self._write_tool_debug_log(event)
+
     def _write_audit_event(self, event: ToolEvent) -> None:
         if not self.options.audit_log_path:
             return
         self.options.audit_log_path.parent.mkdir(parents=True, exist_ok=True)
         with self.options.audit_log_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(event.to_dict(), ensure_ascii=False) + "\n")
+
+    def _write_tool_debug_log(self, event: ToolEvent) -> None:
+        if not self.options.tool_debug_log_path:
+            return
+        self.options.tool_debug_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.options.tool_debug_log_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(event.to_dict(), ensure_ascii=False) + "\n")
 
     def _write_change_record(self, tool_name: str, path: str, result: str) -> None:

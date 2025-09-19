@@ -42,12 +42,33 @@ def main() -> None:
     parser = ArgumentParser(description="Run the interactive Indubitably agent")
     parser.add_argument("--no-color", action="store_true", help="Disable ANSI color output")
     parser.add_argument("--transcript", help="Optional path to append a conversation transcript")
+    parser.add_argument(
+        "--debug-tool-use",
+        dest="debug_tool_use",
+        action="store_const",
+        const=True,
+        help="Enable detailed tool invocation output",
+    )
+    parser.add_argument(
+        "--no-debug-tool-use",
+        dest="debug_tool_use",
+        action="store_const",
+        const=False,
+        help="Disable detailed tool invocation output (default)",
+    )
+    parser.set_defaults(debug_tool_use=False)
+    parser.add_argument(
+        "--tool-debug-log",
+        help="When tool debugging is enabled, append JSONL records of tool invocations to this path",
+    )
     args = parser.parse_args()
 
     run_agent(
         build_default_tools(),
         use_color=not args.no_color,
         transcript_path=args.transcript,
+        debug_tool_use=args.debug_tool_use,
+        tool_debug_log_path=args.tool_debug_log,
     )
 
 

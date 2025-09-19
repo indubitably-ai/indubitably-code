@@ -16,6 +16,8 @@ class RunnerConfig:
     blocked_tools: Optional[Set[str]] = None
     audit_log_path: Optional[Path] = None
     changes_log_path: Optional[Path] = None
+    debug_tool_use: Optional[bool] = None
+    tool_debug_log_path: Optional[Path] = None
 
 
 def load_runner_config(path: Path) -> RunnerConfig:
@@ -72,6 +74,8 @@ def load_runner_config(path: Path) -> RunnerConfig:
         blocked_tools=_to_set(runner_section.get("blocked_tools")) or None,
         audit_log_path=_to_path(runner_section.get("audit_log")),
         changes_log_path=_to_path(runner_section.get("changes_log")),
+        debug_tool_use=_to_bool(runner_section.get("debug_tool_use")),
+        tool_debug_log_path=_to_path(runner_section.get("tool_debug_log")),
     )
 
 

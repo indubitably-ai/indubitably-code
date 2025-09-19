@@ -64,6 +64,27 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         type=Path,
         help="Write JSONL log of file write operations to this path",
     )
+    debug_group = parser.add_mutually_exclusive_group()
+    debug_group.add_argument(
+        "--debug-tool-use",
+        dest="debug_tool_use",
+        action="store_const",
+        const=True,
+        help="Print detailed tool invocation information and enable command logging",
+    )
+    debug_group.add_argument(
+        "--no-debug-tool-use",
+        dest="debug_tool_use",
+        action="store_const",
+        const=False,
+        help="Disable detailed tool invocation logging (default)",
+    )
+    parser.set_defaults(debug_tool_use=None)
+    parser.add_argument(
+        "--tool-debug-log",
+        type=Path,
+        help="When tool debugging is enabled, append JSONL records of tool invocations to this path",
+    )
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON summary")
     parser.add_argument("--verbose", action="store_true", help="Print detailed progress information")
 
@@ -99,6 +120,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         audit_log_path=args.audit_log or config_data.audit_log_path,
         changes_log_path=args.changes_log or config_data.changes_log_path,
         verbose=args.verbose,
+        debug_tool_use=_coalesce_bool(args.debug_tool_use, config_data.debug_tool_use, fallback=False),
+        tool_debug_log_path=args.tool_debug_log or config_data.tool_debug_log_path,
     )
 
     tools = build_default_tools()

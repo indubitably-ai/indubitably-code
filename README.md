@@ -59,16 +59,20 @@ turn and simply prints text blocks.
 ```bash
 uv run python run.py
 # or: uv run python run.py --no-color --transcript logs/session.log
+# enable tool traces: uv run python run.py --debug-tool-use
+# export JSONL: uv run python run.py --tool-debug-log logs/tool-events.jsonl
 ```
 Features:
 - ASCII banner and prompt hints for quick onboarding.
 - Configurable color output and optional transcript logging.
-- Tool call tracing: see inputs and results inline as the model works.
+- Tool call tracing: see inputs and results inline (enable with `--debug-tool-use`).
+- Optional JSONL export of tool calls for local audit trails.
 
 ### Headless CLI
 ```bash
 uv run indubitably-agent --prompt "Summarize today's changes" --max-turns 6 \
-  --allowed-tools read_file,list_files --audit-log logs/audit.jsonl
+  --allowed-tools read_file,list_files --audit-log logs/audit.jsonl \
+  --debug-tool-use --tool-debug-log logs/tool-events.jsonl
 ```
 Why use it:
 - Deterministic runs in CI or Docker.
@@ -126,6 +130,8 @@ language; the agent translates your request into the schema below.
 - `--dry-run` – skip execution and return `tool_result` stubs noting the skip.
 - `--allowed-tools` / `--blocked-tools` – comma-separated allowlist/denylist.
 - `--audit-log path.jsonl` – append every tool invocation as JSON.
+- `--debug-tool-use` / `--no-debug-tool-use` – toggle verbose stderr tracing of tool calls (default off).
+- `--tool-debug-log path.jsonl` – when debugging is enabled, append structured tool call events.
 - `--changes-log path.jsonl` – track filesystem writes (successful or attempted) for auditing.
 - `--json` – emit a structured summary; `--verbose` adds stderr progress updates.
 
@@ -148,6 +154,9 @@ dry_run = false
 allowed_tools = ["read_file", "grep", "codebase_search", "todo_write"]
 audit_log = "logs/audit.jsonl"
 changes_log = "logs/changes.jsonl"
+# enable tool tracing for headless runs
+debug_tool_use = true
+tool_debug_log = "logs/tool-events.jsonl"
 ```
 Relative paths resolve from the config file location, making it easy to mount a directory in Docker
 or CI and collect artifacts.
@@ -157,6 +166,7 @@ or CI and collect artifacts.
 ## Logs, Artifacts, and State
 - **Transcripts**: `run.py --transcript path.log` appends the banner, prompts, tool calls, and responses.
 - **Audit log**: each tool event includes turn number, input payload, result string, and paths touched.
+- **Tool debug log**: turn-indexed tool events captured when `--debug-tool-use` is active.
 - **Change log**: when writing tools succeed (or even attempt writes), their target paths are recorded.
 - **Background commands**: look under `run_logs/` for stdout/stderr captured by `run_terminal_cmd`.
 - **Session TODOs**: `.session_todos.json` keeps the most recent list written by `todo_write` with timestamps.
