@@ -124,6 +124,11 @@ language; the agent translates your request into the schema below.
   - Calls `aws ce` operations like get-cost-and-usage and forecasts with friendly timeframe/metric helpers.
   - Supports quick rollups (e.g., last_7_days by service) and advanced filters or groupings.
   - Example prompt: `show unblended cost by service for the last 30 days`.
+- **`playwright_mcp`** (headless browser automation)
+  - Opens pages with Playwright to collect screenshots, HTML content, or evaluated script results.
+  - Handles navigation wait conditions, viewport tweaks, headers, base64 screenshot returns, and optional ASCII previews for terminal inspection.
+  - Script inputs are auto-wrapped so you can paste snippets without worrying about arrow functions.
+  - Example prompt: `open https://example.com and capture a full-page screenshot with an ascii preview`.
 - **`todo_write`** (session TODOs)
   - Maintain `.session_todos.json`; merge or replace items with id/content/status fields.
   - Example prompt: `record todos for the session: update docs (pending), ship release (in_progress)`.
@@ -162,6 +167,10 @@ usage text before adjusting the parameters.
 When iterating on AWS calls, watch for model rate limits. The agent automatically backs off and
 retries up to five times on Anthropic 429 responses, but shortening prompts, lowering `--max-turns`,
 or pausing between retries will help avoid hitting your per-minute budget.
+
+### Optional dependencies
+- Playwright tooling (`playwright_mcp`) requires `uv add playwright` followed by `uv run playwright install` to provision browser binaries.
+- ASCII previews for Playwright screenshots require `uv add pillow`. Use both `return_screenshot_base64: true` and `ascii_preview: true` when you want the raw bytes and a terminal-friendly view in one call.
 
 For billing insights, stay conversational as well:
 ```text

@@ -12,6 +12,7 @@ from tools_web_search import web_search_tool_def, web_search_impl
 from tools_todo_write import todo_write_tool_def, todo_write_impl
 from tools_aws_api_mcp import aws_api_mcp_tool_def, aws_api_mcp_impl
 from tools_aws_billing_mcp import aws_billing_mcp_tool_def, aws_billing_mcp_impl
+from tools_playwright_mcp import playwright_mcp_tool_def, playwright_mcp_impl
 
 
 def build_default_tools() -> list[Tool]:
@@ -43,6 +44,11 @@ def build_default_tools() -> list[Tool]:
         Tool(
             **aws_billing_mcp_tool_def(),
             fn=aws_billing_mcp_impl,
+            capabilities={"exec_shell"},
+        ),
+        Tool(
+            **playwright_mcp_tool_def(),
+            fn=playwright_mcp_impl,
             capabilities={"exec_shell"},
         ),
     ]
