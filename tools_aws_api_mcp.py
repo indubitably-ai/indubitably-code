@@ -21,7 +21,9 @@ def aws_api_mcp_tool_def() -> dict:
         "description": (
             "Execute read-oriented AWS CLI operations using a structured schema. "
             "Supports selecting the AWS service and operation, optional profile "
-            "and region overrides, and passing CLI parameters."
+            "and region overrides, and passing CLI parameters. Use extra_args=['help'] "
+            "or set operation='help' to fetch CLI usage guidance when unsure about "
+            "required parameters."
         ),
         "input_schema": {
             "type": "object",
@@ -128,7 +130,7 @@ def aws_api_mcp_impl(payload: Dict[str, Any]) -> str:
     if extra_args is not None:
         if not isinstance(extra_args, list) or not all(isinstance(arg, str) for arg in extra_args):
             raise ValueError("'extra_args' must be a list of strings")
-        cmd.extend(extra_args)
+        cmd.extend(_normalize_extra_args(extra_args))
 
     result = subprocess.run(cmd, capture_output=True, text=True)
 
@@ -136,6 +138,17 @@ def aws_api_mcp_impl(payload: Dict[str, Any]) -> str:
         stderr = result.stderr.strip()
         stdout = result.stdout.strip()
         diagnostic = stderr or stdout or "no CLI output"
+        lower_diag = diagnostic.lower()
+        if result.returncode == 252 or lower_diag.startswith("usage:"):
+            diagnostic += (
+                "\nHint: rerun this command with extra_args=['help'] or set operation='help' "
+                "to inspect AWS CLI usage details before trying again."
+            )
+            if "unknown options:" in lower_diag and " true" in lower_diag:
+                diagnostic += (
+                    "\nTip: pass boolean flags as toggles. For example, use parameters={'force': True} "
+                    "which emits --force without an explicit true/false literal."
+                )
         raise RuntimeError(f"AWS CLI command failed ({result.returncode}): {diagnostic}")
 
     output = result.stdout.strip() or result.stderr.strip()
@@ -163,14 +176,14 @@ def _serialize_parameters(parameters: Any) -> List[str]:
             continue
         if not isinstance(key, str) or not key:
             raise ValueError("Parameter names must be non-empty strings")
-        flag = f"--{key}" if not key.startswith("-") else key
+        flag = _build_flag_from_key(key)
         args.extend(_format_parameter(flag, value))
     return args
 
 
 def _format_parameter(flag: str, value: Any) -> List[str]:
     if isinstance(value, bool):
-        return [flag, "true" if value else "false"]
+        return [flag] if value else []
     if isinstance(value, (int, float)):
         return [flag, str(value)]
     if isinstance(value, str):
@@ -178,3 +191,44 @@ def _format_parameter(flag: str, value: Any) -> List[str]:
     if isinstance(value, (list, dict)):
         return [flag, json.dumps(value, ensure_ascii=False)]
     raise ValueError(f"Unsupported parameter type for {flag}: {type(value).__name__}")
+
+
+def _build_flag_from_key(key: str) -> str:
+    if key.startswith("--"):
+        return key
+    if key.startswith("-"):
+        return f"-{_normalize_param_name(key[1:])}"
+    normalized = _normalize_param_name(key)
+    return f"--{normalized}"
+
+
+def _normalize_param_name(name: str) -> str:
+    if not name:
+        return name
+
+    # Preserve existing hyphenation but allow camelCase conversion.
+    working = name.replace("_", "-")
+    result: List[str] = []
+    for ch in working:
+        if ch.isupper():
+            if result and result[-1] not in {"-", "/"}:
+                result.append("-")
+            result.append(ch.lower())
+        else:
+            result.append(ch)
+
+    normalized = "".join(result)
+    # Collapse accidental double hyphens that may occur after conversions.
+    while "--" in normalized:
+        normalized = normalized.replace("--", "-")
+    return normalized
+
+
+def _normalize_extra_args(args: List[str]) -> List[str]:
+    normalized: List[str] = []
+    for arg in args:
+        if arg.strip() in {"--help", "-h"}:
+            normalized.append("help")
+        else:
+            normalized.append(arg)
+    return normalized

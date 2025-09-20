@@ -4,9 +4,10 @@ import sys
 import json
 import re
 import textwrap
+import time
 from pathlib import Path
 from typing import Callable, Dict, Any, List, Iterable, Optional, Set
-from anthropic import Anthropic
+from anthropic import Anthropic, RateLimitError
 from pyfiglet import Figlet
 
 from config import load_anthropic_config
@@ -77,6 +78,8 @@ def run_agent(
     print("Type your prompt and press Enter (ctrl-c to quit)\n")
     read_user = True
 
+    backoff_seconds = 2.0
+    rate_limit_retries = 0
     while True:
         if read_user:
             _print_prompt_menu(DIM, RESET)
@@ -84,6 +87,9 @@ def run_agent(
             line = sys.stdin.readline()
             if not line:
                 break
+            if not line.strip():
+                read_user = True
+                continue
             conversation.append({"role": "user", "content": [{"type": "text", "text": line.rstrip('\n')}]})
             _print_transcript(transcript_path, f"USER: {line.rstrip('\n')}")
 
@@ -96,6 +102,27 @@ def run_agent(
                 messages=conversation,
                 tools=tool_defs,
             )
+            backoff_seconds = 2.0
+            rate_limit_retries = 0
+        except RateLimitError as exc:  # pragma: no cover - requires live API
+            wait = min(backoff_seconds, 30.0)
+            print(
+                f"Anthropic rate limit hit; retrying in {wait:.1f}s... ({exc})",
+                file=sys.stderr,
+            )
+            time.sleep(wait)
+            backoff_seconds = min(backoff_seconds * 2, 60.0)
+            rate_limit_retries += 1
+            if rate_limit_retries > 5:
+                print("Rate limit retries exhausted; aborting current turn.", file=sys.stderr)
+                if conversation and conversation[-1].get("role") == "user":
+                    conversation.pop()
+                read_user = True
+                backoff_seconds = 2.0
+                rate_limit_retries = 0
+                continue
+            read_user = False
+            continue
         except Exception as exc:  # pragma: no cover - surfaced to user
             print(f"Anthropic error: {exc}", file=sys.stderr)
             if conversation and conversation[-1].get("role") == "user":

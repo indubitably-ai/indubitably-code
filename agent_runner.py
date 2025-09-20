@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set
 
-from anthropic import Anthropic
+from anthropic import Anthropic, RateLimitError
 
 from agent import Tool
 from config import load_anthropic_config
@@ -98,13 +99,11 @@ class AgentRunner:
         text_outputs: List[str] = []
         stopped_reason = "completed"
 
+        backoff_seconds = 2.0
+
         for turn_idx in range(1, self.options.max_turns + 1):
-            response = self.client.messages.create(
-                model=self.config.model,
-                max_tokens=self.config.max_tokens,
-                messages=conversation,
-                tools=[tool.to_definition() for tool in self.active_tools],
-            )
+            response = self._call_with_backoff(conversation, backoff_seconds)
+            backoff_seconds = 2.0
 
             conversation.append({"role": "assistant", "content": response.content})
 
@@ -144,6 +143,34 @@ class AgentRunner:
             stopped_reason=stopped_reason,
             conversation=conversation,
         )
+
+    def _call_with_backoff(
+        self,
+        conversation: List[Dict[str, Any]],
+        backoff_seconds: float,
+    ) -> Any:
+        wait = backoff_seconds
+        retries = 0
+        while True:
+            try:
+                return self.client.messages.create(
+                    model=self.config.model,
+                    max_tokens=self.config.max_tokens,
+                    messages=conversation,
+                    tools=[tool.to_definition() for tool in self.active_tools],
+                )
+            except RateLimitError as exc:  # pragma: no cover - live API scenario
+                retries += 1
+                if retries > 5:
+                    raise
+                delay = min(wait, 30.0)
+                if self.options.verbose:
+                    print(
+                        f"Anthropic rate limit hit; retry {retries}/5 in {delay:.1f}s...",
+                        file=sys.stderr,
+                    )
+                time.sleep(delay)
+                wait = min(wait * 2, 60.0)
 
     def _filter_tools(self) -> List[Tool]:
         allowed = self.options.allowed_tools

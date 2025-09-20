@@ -116,7 +116,14 @@ language; the agent translates your request into the schema below.
 - **`aws_api_mcp`** (structured AWS CLI access)
   - Wraps the `aws` CLI with schema-validated inputs for read-focused operations.
   - Supports selecting service/operation, profile & region overrides, JSON-encoded parameters, and pager suppression.
+  - Unsure about required flags? Ask the agent to run command help (e.g., `extra_args: ["help"]`) so it can read the AWS CLI usage before retrying.
+  - Parameter names are normalized automatically, so `desiredCount: 0` or `logGroupName` work even if the CLI expects dashed flags.
+  - Boolean parameters become toggle flags: `force: true` turns into `--force`; omit or set `false` to skip emitting the flag.
   - Example prompt: `fetch the last 50 events from CloudWatch log group /aws/lambda/payment-handler in us-west-2`.
+- **`aws_billing_mcp`** (Cost Explorer insights)
+  - Calls `aws ce` operations like get-cost-and-usage and forecasts with friendly timeframe/metric helpers.
+  - Supports quick rollups (e.g., last_7_days by service) and advanced filters or groupings.
+  - Example prompt: `show unblended cost by service for the last 30 days`.
 - **`todo_write`** (session TODOs)
   - Maintain `.session_todos.json`; merge or replace items with id/content/status fields.
   - Example prompt: `record todos for the session: update docs (pending), ship release (in_progress)`.
@@ -146,6 +153,25 @@ To customize further, mention parameters like `start-time`, specific log stream 
 services (for example, "Describe the current Lambda configuration" or "List the DynamoDB tables in
 production"). The agent routes each request through the tool without requiring you to remember the
 AWS CLI syntax.
+
+If a request fails because required CLI flags are missing, follow up with something like
+"Check the help for that CLI command". The agent can rerun the tool with `extra_args` set to `help`
+or even call a service-level help operation (`service=ecs, operation=help`) to inspect the AWS CLI
+usage text before adjusting the parameters.
+
+When iterating on AWS calls, watch for model rate limits. The agent automatically backs off and
+retries up to five times on Anthropic 429 responses, but shortening prompts, lowering `--max-turns`,
+or pausing between retries will help avoid hitting your per-minute budget.
+
+For billing insights, stay conversational as well:
+```text
+You ▸ How much did we spend by service in the last month?
+Samus ▸ (calls aws_billing_mcp → `ce get-cost-and-usage --time-period Start=2024-08-01,End=2024-09-01 --metrics UnblendedCost --group-by ...`)
+Samus ▸ (summarizes the cost by service)
+```
+
+Feel free to iterate on timeframe (`last_7_days`, `month_to_date`), granularity (`DAILY`, `MONTHLY`),
+or add dimensions/tag keys to `group_by` just by describing what you need.
 
 ---
 
