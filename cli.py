@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional
 from agent_runner import AgentRunOptions, AgentRunResult, AgentRunner
 from runner_config import RunnerConfig, load_runner_config
 from run import build_default_tools
+from session import load_session_settings
 
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
@@ -107,6 +108,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     prompt = load_prompt(args)
 
     config_data = _load_runner_config(args.config)
+    session_settings = load_session_settings(args.config)
 
     allowed_override = _parse_name_set(args.allowed_tools)
     blocked_override = _parse_name_set(args.blocked_tools)
@@ -125,7 +127,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
 
     tools = build_default_tools()
-    runner = AgentRunner(tools, options)
+    runner = AgentRunner(tools, options, session_settings=session_settings)
 
     if args.verbose:
         print(f"Running headless agent with {len(runner.active_tools)} tools...", file=sys.stderr)

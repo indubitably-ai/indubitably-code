@@ -26,6 +26,41 @@ trails, and even keep lightweight TODOs for your session.
 - Interactive agent (`run.py`) with colorized terminal UX, transcripts, and an extended toolset.
 - Headless CLI (`indubitably-agent`) for CI/batch workflows with policy controls and JSON output.
 - Comprehensive tools for filesystem edits, searches, shell execution, patch application, web lookups, and session planning.
+- Context-aware prompt packing with automatic compaction, pins, and tool-output trimming.
+
+### Context Management & Compaction
+The agent now keeps a structured session history (`session/context.py`) backed by a token meter and compaction engine.
+Key behaviours:
+- Always preserve system guidance and the most recent user/assistant turns while summarising older conversation into goals, decisions, constraints, files, APIs, and TODOs.
+- Auto-truncate oversized tool outputs using deterministic head/tail windows so critical excerpts stay in scope.
+- Maintain a compact summary block that is reused across compaction passes to avoid token creep.
+- Insert pinned snippets (coding standards, requirements, secrets placeholders) inside a dedicated budget so they persist across runs.
+
+### Slash Commands & Status
+Slash commands are available in the interactive TUI to inspect or tweak the session mid-run:
+- `/status` – show token usage, last compaction, and active pins.
+- `/compact [focus]` – force summarisation immediately.
+- `/config set group.field=value` – adjust runtime settings such as `compaction.keep_last_turns`.
+- `/pin add [--ttl=SECONDS] text` / `/unpin id` – manage compaction-resistant snippets.
+
+### Configuration & Telemetry
+Session defaults live in TOML via `session/settings.py`. By default we load `~/.agent/config.toml` (or the path from `INDUBITABLY_SESSION_CONFIG`) and honour sections such as:
+```toml
+[model]
+name = "gpt-4.1"
+context_tokens = 128000
+
+[compaction]
+auto = true
+keep_last_turns = 4
+target_tokens = 110000
+
+[tools.limits]
+max_tool_tokens = 4000
+max_stdout_bytes = 131072
+max_lines = 800
+```
+Telemetry counters (`session/telemetry.py`) record token usage, compaction events, drops, summariser invocations, pin sizes, and MCP fetches; call `/status` or inspect the session object to view them.
 
 ### Requirements
 1. Python 3.13+
@@ -232,6 +267,9 @@ or CI and collect artifacts.
 - **Change log**: when writing tools succeed (or even attempt writes), their target paths are recorded.
 - **Background commands**: look under `run_logs/` for stdout/stderr captured by `run_terminal_cmd`.
 - **Session TODOs**: `.session_todos.json` keeps the most recent list written by `todo_write` with timestamps.
+
+### Testing
+Run `pytest -q` to execute the full suite, including new coverage for session compaction, slash commands, and CLI wiring.
 
 ---
 

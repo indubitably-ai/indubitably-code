@@ -23,10 +23,12 @@ requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
+packages = ["prompt", "session"]
 py-modules = [
     "agent",
     "agent_runner",
     "cli",
+    "commands",
     "config",
     "main",
     "run",

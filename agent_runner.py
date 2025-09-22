@@ -6,12 +6,14 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 
 from anthropic import Anthropic, RateLimitError
 
 from agent import Tool
 from config import load_anthropic_config
+from prompt import PromptPacker
+from session import ContextSession, SessionSettings, load_session_settings
 
 
 @dataclass
@@ -67,15 +69,19 @@ class AgentRunner:
         options: AgentRunOptions,
         *,
         client: Optional[Anthropic] = None,
+        session_settings: Optional[SessionSettings] = None,
     ) -> None:
         self.options = options
         self.config = load_anthropic_config()
+        self.session_settings = session_settings or load_session_settings()
         self.client = client or Anthropic()
         self.all_tools = list(tools)
         self.active_tools = self._filter_tools()
         self.tool_map = {tool.name: tool for tool in self.active_tools}
         self.tool_events: List[ToolEvent] = []
         self.edited_files: Set[str] = set()
+        self.context: Optional[ContextSession] = None
+        self._packer: Optional[PromptPacker] = None
 
         if options.allowed_tools:
             missing = options.allowed_tools - set(self.tool_map)
@@ -91,62 +97,106 @@ class AgentRunner:
         if not prompt.strip():
             raise ValueError("prompt must contain text")
 
-        conversation: List[Dict[str, Any]] = [
-            *(initial_conversation or []),
-            {"role": "user", "content": [{"type": "text", "text": prompt}]},
-        ]
+        self.tool_events = []
+        self.edited_files = set()
+
+        context = ContextSession.from_settings(self.session_settings)
+        packer = PromptPacker(context)
+        self.context = context
+        self._packer = packer
+
+        if initial_conversation:
+            self._seed_context(context, initial_conversation)
+
+        context.add_user_message(prompt.strip())
 
         text_outputs: List[str] = []
         stopped_reason = "completed"
-
-        backoff_seconds = 2.0
+        turns_used = 0
+        should_rollback = True
 
         for turn_idx in range(1, self.options.max_turns + 1):
-            response = self._call_with_backoff(conversation, backoff_seconds)
-            backoff_seconds = 2.0
+            packed = packer.pack()
+            try:
+                response = self._call_with_backoff(packed.messages, backoff_seconds=2.0)
+            except Exception:
+                if should_rollback:
+                    context.rollback_last_turn()
+                raise
 
-            conversation.append({"role": "assistant", "content": response.content})
+            assistant_blocks = _normalize_content(response.content)
+            context.add_assistant_message(assistant_blocks)
+            should_rollback = False
 
             tool_results_content: List[Dict[str, Any]] = []
-            encountered_tool = False
             tool_error = False
+            encountered_tool = False
 
-            for block in response.content:
-                if getattr(block, "type", None) == "text":
-                    text_outputs.append(getattr(block, "text", ""))
-                elif getattr(block, "type", None) == "tool_use":
+            for block in assistant_blocks:
+                btype = block.get("type")
+                if btype == "text":
+                    text_outputs.append(block.get("text", ""))
+                elif btype == "tool_use":
                     encountered_tool = True
                     event, tool_result = self._handle_tool_use(block, turn_idx)
                     tool_results_content.append(tool_result)
                     tool_error = tool_error or event.is_error
 
+            if tool_results_content:
+                context.add_tool_results(tool_results_content, dedupe=False)
+
             if not encountered_tool:
                 turns_used = turn_idx
                 break
-
-            conversation.append({"role": "user", "content": tool_results_content})
 
             if tool_error and self.options.exit_on_tool_error:
                 stopped_reason = "tool_error"
                 turns_used = turn_idx
                 break
         else:
-            # max turns exhausted
             turns_used = self.options.max_turns
             stopped_reason = "max_turns"
 
+        final_response = "\n".join(txt for txt in text_outputs if txt).strip()
+        conversation_payload = context.build_messages()
+
         return AgentRunResult(
-            final_response="\n".join(txt for txt in text_outputs if txt).strip(),
+            final_response=final_response,
             tool_events=self.tool_events,
             edited_files=sorted(self.edited_files),
             turns_used=turns_used,
             stopped_reason=stopped_reason,
-            conversation=conversation,
+            conversation=conversation_payload,
         )
+
+
+    def _seed_context(self, context: ContextSession, conversation: List[Dict[str, Any]]) -> None:
+        auto_state = context.auto_compact
+        context.auto_compact = False
+        for message in conversation:
+            role = message.get("role")
+            blocks = _normalize_content(message.get("content", []))
+            if role == "system":
+                text = _blocks_to_text(blocks)
+                if text:
+                    context.register_system_text(text)
+            elif role == "assistant":
+                context.add_assistant_message(blocks)
+            elif role == "user":
+                if blocks and all(block.get("type") == "tool_result" for block in blocks):
+                    context.add_tool_results(blocks, dedupe=False)
+                else:
+                    text = _blocks_to_text(blocks)
+                    if text:
+                        context.add_user_message(text)
+        context.auto_compact = auto_state
+        if auto_state:
+            context.maybe_compact()
+
 
     def _call_with_backoff(
         self,
-        conversation: List[Dict[str, Any]],
+        messages: List[Dict[str, Any]],
         backoff_seconds: float,
     ) -> Any:
         wait = backoff_seconds
@@ -156,7 +206,7 @@ class AgentRunner:
                 return self.client.messages.create(
                     model=self.config.model,
                     max_tokens=self.config.max_tokens,
-                    messages=conversation,
+                    messages=messages,
                     tools=[tool.to_definition() for tool in self.active_tools],
                 )
             except RateLimitError as exc:  # pragma: no cover - live API scenario
@@ -186,9 +236,14 @@ class AgentRunner:
         return result
 
     def _handle_tool_use(self, block: Any, turn_idx: int) -> tuple[ToolEvent, Dict[str, Any]]:
-        tool_name = getattr(block, "name", "")
-        tool_input = getattr(block, "input", {})
-        tool_use_id = getattr(block, "id", f"tool-{turn_idx}")
+        if isinstance(block, dict):
+            tool_name = block.get("name", "")
+            tool_input = block.get("input", {})
+            tool_use_id = block.get("id") or block.get("tool_use_id", f"tool-{turn_idx}")
+        else:
+            tool_name = getattr(block, "name", "")
+            tool_input = getattr(block, "input", {})
+            tool_use_id = getattr(block, "id", f"tool-{turn_idx}")
         tool = self.tool_map.get(tool_name)
 
         skipped = False
@@ -298,3 +353,42 @@ def _extract_paths(input_payload: Any) -> List[str]:
         if isinstance(val, str):
             paths.append(val)
     return paths
+
+
+def _normalize_content(blocks: Iterable[Any]) -> List[Dict[str, Any]]:
+    result: List[Dict[str, Any]] = []
+    for block in blocks:
+        result.append(_normalize_block(block))
+    return result
+
+
+def _normalize_block(block: Any) -> Dict[str, Any]:
+    if isinstance(block, dict):
+        return dict(block)
+    btype = getattr(block, "type", None)
+    if btype == "text":
+        return {"type": "text", "text": getattr(block, "text", "")}
+    if btype == "tool_use":
+        return {
+            "type": "tool_use",
+            "id": getattr(block, "id", getattr(block, "tool_use_id", "")),
+            "name": getattr(block, "name", ""),
+            "input": getattr(block, "input", {}),
+        }
+    if btype == "tool_result":
+        return {
+            "type": "tool_result",
+            "tool_use_id": getattr(block, "tool_use_id", getattr(block, "id", "")),
+            "content": getattr(block, "content", ""),
+            "is_error": getattr(block, "is_error", False),
+        }
+    data = {"type": btype or "text"}
+    for attr in ("id", "name", "text", "content", "input"):
+        if hasattr(block, attr):
+            data[attr] = getattr(block, attr)
+    return data
+
+
+def _blocks_to_text(blocks: Iterable[Dict[str, Any]]) -> str:
+    texts = [block.get("text", "") for block in blocks if block.get("type") == "text"]
+    return "\n".join(txt for txt in texts if txt).strip()

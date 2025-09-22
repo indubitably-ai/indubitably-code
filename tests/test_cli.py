@@ -11,9 +11,10 @@ from agent_runner import AgentRunResult, ToolEvent
 class DummyRunner:
     instances = []
 
-    def __init__(self, tools, options):
+    def __init__(self, tools, options, session_settings=None):
         self.active_tools = tools
         self.options = options
+        self.session_settings = session_settings
         self.called_with = None
         DummyRunner.instances.append(self)
 

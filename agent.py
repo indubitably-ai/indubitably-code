@@ -11,6 +11,9 @@ from anthropic import Anthropic, RateLimitError
 from pyfiglet import Figlet
 
 from config import load_anthropic_config
+from commands import handle_slash_command
+from prompt import PromptPacker
+from session import ContextSession, load_session_settings
 
 
 ToolFunc = Callable[[Dict[str, Any]], str]
@@ -49,17 +52,19 @@ def run_agent(
     tool_debug_log_path: Optional[str] = None,
 ) -> None:
     config = load_anthropic_config()
+    session_settings = load_session_settings()
+    context = ContextSession.from_settings(session_settings)
+    packer = PromptPacker(context)
     client = Anthropic()
-    conversation: List[Dict[str, Any]] = []
     debug_log_path = Path(tool_debug_log_path).expanduser().resolve() if tool_debug_log_path else None
     tool_event_counter = 0
-    CYAN = "\033[96m" if use_color else ""
-    GREEN = "\033[92m" if use_color else ""
-    YELLOW = "\033[93m" if use_color else ""
-    RED = "\033[91m" if use_color else ""
-    BOLD = "\033[1m" if use_color else ""
-    DIM = "\033[2m" if use_color else ""
-    RESET = "\033[0m" if use_color else ""
+    CYAN = "[96m" if use_color else ""
+    GREEN = "[92m" if use_color else ""
+    YELLOW = "[93m" if use_color else ""
+    RED = "[91m" if use_color else ""
+    BOLD = "[1m" if use_color else ""
+    DIM = "[2m" if use_color else ""
+    RESET = "[0m" if use_color else ""
     figlet = Figlet(font="standard")
     ascii_art = figlet.renderText("INDUBITABLY CODE")
     art_lines = ascii_art.rstrip("\n").split("\n")
@@ -81,25 +86,38 @@ def run_agent(
     backoff_seconds = 2.0
     rate_limit_retries = 0
     while True:
+        added_user_this_turn = False
         if read_user:
-            _print_prompt_menu(DIM, RESET)
+            status_snapshot = context.status()
+            _print_prompt_menu(DIM, RESET, status_snapshot)
             print(f"{BOLD}You ▸ {RESET}", end="", flush=True)
             line = sys.stdin.readline()
             if not line:
                 break
-            if not line.strip():
+            stripped = line.rstrip("\n")
+            if not stripped:
                 read_user = True
                 continue
-            conversation.append({"role": "user", "content": [{"type": "text", "text": line.rstrip('\n')}]})
-            _print_transcript(transcript_path, f"USER: {line.rstrip('\n')}")
+            handled, command_message = handle_slash_command(stripped, context)
+            if handled:
+                if command_message:
+                    output = f"{YELLOW}{command_message}{RESET}" if use_color else command_message
+                    print(output)
+                    _print_transcript(transcript_path, f"COMMAND: {command_message}")
+                read_user = True
+                continue
+            context.add_user_message(stripped)
+            added_user_this_turn = True
+            _print_transcript(transcript_path, f"USER: {stripped}")
 
         tool_defs = [t.to_definition() for t in tools]
 
         try:
+            packed = packer.pack()
             msg = client.messages.create(
                 model=config.model,
                 max_tokens=config.max_tokens,
-                messages=conversation,
+                messages=packed.messages,
                 tools=tool_defs,
             )
             backoff_seconds = 2.0
@@ -115,8 +133,8 @@ def run_agent(
             rate_limit_retries += 1
             if rate_limit_retries > 5:
                 print("Rate limit retries exhausted; aborting current turn.", file=sys.stderr)
-                if conversation and conversation[-1].get("role") == "user":
-                    conversation.pop()
+                if added_user_this_turn:
+                    context.rollback_last_turn()
                 read_user = True
                 backoff_seconds = 2.0
                 rate_limit_retries = 0
@@ -125,22 +143,26 @@ def run_agent(
             continue
         except Exception as exc:  # pragma: no cover - surfaced to user
             print(f"Anthropic error: {exc}", file=sys.stderr)
-            if conversation and conversation[-1].get("role") == "user":
-                conversation.pop()
+            if added_user_this_turn:
+                context.rollback_last_turn()
             read_user = True
             continue
 
-        conversation.append({"role": "assistant", "content": msg.content})
+        assistant_blocks = _normalize_content(msg.content)
+        context.add_assistant_message(assistant_blocks)
 
-        tool_results_content: List[Dict[str, Any]] = []
-        for block in msg.content:
-            if block.type == "text":
-                _print_assistant_text(block.text, GREEN, RESET)
-                _print_transcript(transcript_path, f"SAMUS: {block.text}")
-            elif block.type == "tool_use":
-                tool_name = block.name
-                tool_input = block.input
-                tool_use_id = block.id
+        encountered_tool = False
+        for block_dict in assistant_blocks:
+            btype = block_dict.get("type")
+            if btype == "text":
+                text = block_dict.get("text", "")
+                _print_assistant_text(text, GREEN, RESET)
+                _print_transcript(transcript_path, f"SAMUS: {text}")
+            elif btype == "tool_use":
+                encountered_tool = True
+                tool_name = block_dict.get("name", "")
+                tool_input = block_dict.get("input", {})
+                tool_use_id = block_dict.get("id") or block_dict.get("tool_use_id", "tool")
 
                 _print_tool_invocation(
                     tool_name,
@@ -153,79 +175,74 @@ def run_agent(
 
                 impl = next((t for t in tools if t.name == tool_name), None)
                 if impl is None:
-                    _print_tool_result("tool not found", True, RED, RESET, verbose=debug_tool_use)
-                    _print_transcript(transcript_path, f"TOOL {tool_name} ERROR: not found")
-                    tool_results_content.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": tool_use_id,
-                            "content": "tool not found",
-                            "is_error": True,
-                        }
-                    )
-                    _record_tool_debug_event(
-                        debug_tool_use,
-                        debug_log_path,
-                        turn=tool_event_counter + 1,
-                        tool_name=tool_name,
-                        payload=tool_input,
-                        result="tool not found",
-                        is_error=True,
-                        skipped=False,
-                    )
+                    result_str = "tool not found"
+                    is_error = True
                 else:
                     try:
                         result_str = impl.fn(tool_input)
-                        _print_tool_result(result_str, False, GREEN, RESET, verbose=debug_tool_use)
-                        _print_transcript(transcript_path, f"TOOL {tool_name} RESULT: {result_str}")
-                        tool_results_content.append(
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": tool_use_id,
-                                "content": result_str,
-                                "is_error": False,
-                            }
-                        )
-                        _record_tool_debug_event(
-                            debug_tool_use,
-                            debug_log_path,
-                            turn=tool_event_counter + 1,
-                            tool_name=tool_name,
-                            payload=tool_input,
-                            result=result_str,
-                            is_error=False,
-                            skipped=False,
-                        )
-                    except Exception as e:
-                        _print_tool_result(str(e), True, RED, RESET, verbose=debug_tool_use)
-                        _print_transcript(transcript_path, f"TOOL {tool_name} ERROR: {e}")
-                        tool_results_content.append(
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": tool_use_id,
-                                "content": str(e),
-                                "is_error": True,
-                            }
-                        )
-                        _record_tool_debug_event(
-                            debug_tool_use,
-                            debug_log_path,
-                            turn=tool_event_counter + 1,
-                            tool_name=tool_name,
-                            payload=tool_input,
-                            result=str(e),
-                            is_error=True,
-                            skipped=False,
-                        )
+                        is_error = False
+                    except Exception as exc:  # pragma: no cover - defensive
+                        result_str = str(exc)
+                        is_error = True
+
+                _print_tool_result(result_str, is_error, RED if is_error else GREEN, RESET, verbose=debug_tool_use)
+                transcript_label = "ERROR" if is_error else "RESULT"
+                _print_transcript(transcript_path, f"TOOL {tool_name} {transcript_label}: {result_str}")
+
+                context.add_tool_text_result(tool_use_id, result_str, is_error=is_error)
+
+                _record_tool_debug_event(
+                    debug_tool_use,
+                    debug_log_path,
+                    turn=tool_event_counter + 1,
+                    tool_name=tool_name,
+                    payload=tool_input,
+                    result=result_str,
+                    is_error=is_error,
+                    skipped=False,
+                )
 
                 tool_event_counter += 1
 
-        if not tool_results_content:
+        if not encountered_tool:
             read_user = True
-            continue
+        else:
+            read_user = False
 
-        conversation.append({"role": "user", "content": tool_results_content})
-        read_user = False
+
+def _normalize_content(blocks: Iterable[Any]) -> List[Dict[str, Any]]:
+    return [_normalize_block(block) for block in blocks]
+
+
+def _normalize_block(block: Any) -> Dict[str, Any]:
+    btype = getattr(block, "type", None) or (block.get("type") if isinstance(block, dict) else None)
+    if isinstance(block, dict):
+        base = dict(block)
+        base.setdefault("type", btype or "text")
+        return base
+    if btype == "text":
+        return {"type": "text", "text": getattr(block, "text", "")}
+    if btype == "tool_use":
+        return {
+            "type": "tool_use",
+            "id": getattr(block, "id", getattr(block, "tool_use_id", "")),
+            "name": getattr(block, "name", ""),
+            "input": getattr(block, "input", {}),
+        }
+    if btype == "tool_result":
+        return {
+            "type": "tool_result",
+            "tool_use_id": getattr(block, "tool_use_id", getattr(block, "id", "")),
+            "content": getattr(block, "content", ""),
+            "is_error": getattr(block, "is_error", False),
+        }
+    data = {"type": btype or "text"}
+    for attr in ("id", "name", "text", "content", "input"):
+        if hasattr(block, attr):
+            data[attr] = getattr(block, attr)
+    return data
+
+
 
 
 def _print_assistant_text(text: str, color: str, reset: str, width: int = 80) -> None:
@@ -358,6 +375,14 @@ def _format_assistant_text(text: str, width: int = 80) -> str:
     return "\n".join(lines).rstrip()
 
 
-def _print_prompt_menu(dim: str, reset: str) -> None:
-    menu = f"{dim}Send ↵  •  Quit Ctrl+C{reset}" if dim or reset else "Send ↵  •  Quit Ctrl+C"
-    print(menu)
+def _print_prompt_menu(dim: str, reset: str, status: Optional[Dict[str, Any]] = None) -> None:
+    base = f"{dim}Send ↵  •  /status  •  /compact  •  Quit Ctrl+C{reset}" if dim or reset else "Send ↵  •  /status  •  /compact  •  Quit Ctrl+C"
+    print(base)
+    if not status:
+        return
+    tokens = status.get("tokens", 0)
+    window = status.get("window", 0)
+    usage = status.get("usage_pct", 0.0)
+    remaining = max(window - tokens, 0) if isinstance(window, (int, float)) else 0
+    metrics = f"{dim}Tokens {tokens}/{window} ({usage}%)  •  Context left {remaining}{reset}" if dim or reset else f"Tokens {tokens}/{window} ({usage}%)  •  Context left {remaining}"
+    print(metrics)
