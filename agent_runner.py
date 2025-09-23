@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 from anthropic import Anthropic, RateLimitError
 
 from agent import Tool
+from agents_md import load_agents_md
 from config import load_anthropic_config
 from prompt import PromptPacker
 from session import ContextSession, SessionSettings, load_session_settings
@@ -101,6 +102,9 @@ class AgentRunner:
         self.edited_files = set()
 
         context = ContextSession.from_settings(self.session_settings)
+        agents_doc = load_agents_md()
+        if agents_doc:
+            context.register_system_text(agents_doc.system_text())
         packer = PromptPacker(context)
         self.context = context
         self._packer = packer

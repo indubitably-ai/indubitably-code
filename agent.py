@@ -10,6 +10,7 @@ from typing import Callable, Dict, Any, List, Iterable, Optional, Set
 from anthropic import Anthropic, RateLimitError
 from pyfiglet import Figlet
 
+from agents_md import load_agents_md
 from config import load_anthropic_config
 from commands import handle_slash_command
 from prompt import PromptPacker
@@ -54,6 +55,9 @@ def run_agent(
     config = load_anthropic_config()
     session_settings = load_session_settings()
     context = ContextSession.from_settings(session_settings)
+    agents_doc = load_agents_md()
+    if agents_doc:
+        context.register_system_text(agents_doc.system_text())
     packer = PromptPacker(context)
     client = Anthropic()
     debug_log_path = Path(tool_debug_log_path).expanduser().resolve() if tool_debug_log_path else None

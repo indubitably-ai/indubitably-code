@@ -27,6 +27,7 @@ trails, and even keep lightweight TODOs for your session.
 - Headless CLI (`indubitably-agent`) for CI/batch workflows with policy controls and JSON output.
 - Comprehensive tools for filesystem edits, searches, shell execution, patch application, web lookups, and session planning.
 - Context-aware prompt packing with automatic compaction, pins, and tool-output trimming.
+- Automatically loads repository `AGENTS.md` guidance so every session starts with local standards.
 
 ### Context Management & Compaction
 The agent now keeps a structured session history (`session/context.py`) backed by a token meter and compaction engine.

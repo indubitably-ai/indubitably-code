@@ -5,6 +5,7 @@ import json
 import pytest
 
 from agent import Tool
+from agents_md import load_agents_md
 from agent_runner import AgentRunOptions, AgentRunner
 
 
@@ -68,6 +69,13 @@ def test_agent_runner_executes_tools_and_tracks_files(tmp_path):
 
     changes = (tmp_path / "changes.jsonl").read_text(encoding="utf-8").strip().splitlines()
     assert changes and json.loads(changes[0])["path"] == "notes.txt"
+    doc = load_agents_md()
+    assert doc is not None
+    assert result.conversation
+    first_message = result.conversation[0]
+    assert first_message["role"] == "system"
+    assert first_message["content"]
+    assert doc.system_text().splitlines()[0] in first_message["content"][0]["text"]
 
 
 def test_agent_runner_blocks_disallowed_tools():

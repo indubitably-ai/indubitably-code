@@ -27,6 +27,7 @@ packages = ["prompt", "session"]
 py-modules = [
     "agent",
     "agent_runner",
+    "agents_md",
     "cli",
     "commands",
     "config",
