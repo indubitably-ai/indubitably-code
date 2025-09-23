@@ -382,7 +382,12 @@ def _print_prompt_menu(dim: str, reset: str, status: Optional[Dict[str, Any]] = 
         return
     tokens = status.get("tokens", 0)
     window = status.get("window", 0)
-    usage = status.get("usage_pct", 0.0)
     remaining = max(window - tokens, 0) if isinstance(window, (int, float)) else 0
-    metrics = f"{dim}Tokens {tokens}/{window} ({usage}%)  •  Context left {remaining}{reset}" if dim or reset else f"Tokens {tokens}/{window} ({usage}%)  •  Context left {remaining}"
+    if isinstance(window, (int, float)) and window > 0:
+        context_pct = round(max(remaining / window * 100, 0.0), 2)
+        context_pct_str = f"{context_pct:.0f}" if context_pct.is_integer() else f"{context_pct:.2f}".rstrip('0').rstrip('.')
+        context_display = f"{context_pct_str}% Context left"
+    else:
+        context_display = "Context left n/a"
+    metrics = f"{dim}Tokens {tokens}/{window}  •  {context_display}{reset}" if dim or reset else f"Tokens {tokens}/{window}  •  {context_display}"
     print(metrics)

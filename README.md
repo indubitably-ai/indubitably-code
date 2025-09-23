@@ -300,3 +300,10 @@ The agent will chain tool calls, stream results, and provide a concise wrap-up w
 need hallucination-free runs, favor `--dry-run` to inspect planned actions before letting Samus loose.
 
 Happy hacking!
+
+---
+
+## License
+
+This project is licensed under the [Apache License 2.0](LICENSE).
+

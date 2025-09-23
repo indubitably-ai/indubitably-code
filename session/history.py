@@ -145,6 +145,7 @@ class HistoryStore:
 
     def remove_records(self, predicate) -> None:
         self._messages = [record for record in self._messages if not predicate(record)]
+        self._rebuild_tool_hashes()
 
     def ensure_summary_index(self) -> Optional[int]:
         if not self._summary_record:
@@ -191,6 +192,7 @@ class HistoryStore:
             for record in self._messages
             if record.kind == "system" or record.turn_id >= turn_id or record is self._summary_record
         ]
+        self._rebuild_tool_hashes()
 
     def rollback_current_turn(self) -> None:
         if self._turn_counter <= 0:
@@ -202,6 +204,7 @@ class HistoryStore:
             if record.turn_id != turn_id or record.kind == "system"
         ]
         self._turn_counter = max(0, self._turn_counter - 1)
+        self._rebuild_tool_hashes()
 
     def set_compacted_content(self, record: MessageRecord, *, text: str) -> None:
         compact_content = [{"type": "text", "text": text}]
@@ -216,12 +219,29 @@ class HistoryStore:
         record.compact_tokens = None
 
     def register_tool_hash(self, payload: str, record: MessageRecord) -> None:
-        digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        digest = self._tool_digest(payload)
+        record.metadata["tool_hash"] = digest
         self._tool_hashes[digest] = record
 
     def has_tool_hash(self, payload: str) -> bool:
-        digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        digest = self._tool_digest(payload)
         return digest in self._tool_hashes
+
+    def _rebuild_tool_hashes(self) -> None:
+        self._tool_hashes = {}
+        for record in self._messages:
+            if record.kind != "tool_result":
+                continue
+            digest = record.metadata.get("tool_hash")
+            if not digest:
+                payload = str(record.content)
+                digest = self._tool_digest(payload)
+                record.metadata["tool_hash"] = digest
+            self._tool_hashes[digest] = record
+
+    @staticmethod
+    def _tool_digest(payload: str) -> str:
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def _build_message(
         self,

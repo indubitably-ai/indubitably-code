@@ -58,3 +58,35 @@ def test_slash_commands_manage_pins_and_status():
     handled, unknown = handle_slash_command("/unknown", session)
     assert handled is True
     assert "Unknown" in unknown
+
+
+def test_tool_result_dedupe_cleared_on_rollback():
+    session = ContextSession(_make_settings())
+    session.register_system_text("system")
+
+    session.add_user_message("search for compaction logic")
+    session.add_assistant_message([
+        {"type": "tool_use", "id": "toolu_demo", "name": "codebase_search", "input": {"query": "compaction"}},
+    ])
+
+    first_record = session.add_tool_text_result("toolu_demo", "first-result", is_error=False)
+    assert first_record is not None
+
+    session.rollback_last_turn()
+
+    session.add_user_message("search for compaction logic")
+    session.add_assistant_message([
+        {"type": "tool_use", "id": "toolu_demo", "name": "codebase_search", "input": {"query": "compaction"}},
+    ])
+
+    second_record = session.add_tool_text_result("toolu_demo", "first-result", is_error=False)
+    assert second_record is not None
+
+    messages = session.build_messages()
+    assert any(
+        msg["role"] == "user"
+        and msg["content"]
+        and msg["content"][0].get("type") == "tool_result"
+        and msg["content"][0].get("tool_use_id") == "toolu_demo"
+        for msg in messages
+    )
