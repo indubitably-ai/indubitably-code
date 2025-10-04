@@ -308,3 +308,9 @@ Happy hacking!
 
 This project is licensed under the [Apache License 2.0](LICENSE).
 
+
+### Dry-run first
+Use `dry_run:true` on any mutating tool (`apply_patch`, `line_edit`, `edit_file`, `create_file`, `rename_file`, `template_block`) to validate parameters and inspect the JSON response before touching files. Successful dry-runs return `"dry_run": true`; failures include an `error` field describing what to adjust.
+
+### Large files
+When files exceed a couple thousand lines, `line_edit` and `template_block` return warnings plus `total_lines` in their dry-run responses. You can rely on the streaming rewrites to avoid loading the entire file, but consider anchoring your edits carefully (or using multiple dry-runs) so the changes land where expected.
