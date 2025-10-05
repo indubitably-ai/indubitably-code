@@ -68,14 +68,19 @@ class ContextSession:
         return record
 
     def add_tool_text_result(self, tool_use_id: str, text: str, *, is_error: bool) -> Optional[MessageRecord]:
+        block = self.build_tool_result_block(tool_use_id, text, is_error=is_error)
+        # Always emit the tool result to satisfy the Anthropic API requirement
+        # that every tool_use is immediately followed by a tool_result message.
+        return self.add_tool_results([block], dedupe=False)
+
+    def build_tool_result_block(self, tool_use_id: str, text: str, *, is_error: bool) -> Dict[str, Any]:
         truncated = self._truncate_tool_text(text)
-        block: Dict[str, Any] = {
+        return {
             "type": "tool_result",
             "tool_use_id": tool_use_id,
             "content": truncated,
             "is_error": is_error,
         }
-        return self.add_tool_results([block])
 
     def rollback_last_turn(self) -> None:
         self.history.rollback_current_turn()

@@ -149,12 +149,10 @@ def test_apply_patch_conflict_detection(tmp_path, monkeypatch):
     (base / "conflict.txt").write_text("alpha\nBETA\n", encoding="utf-8")
 
     result = json.loads(apply_patch_impl({"file_path": "conflict.txt", "patch": patch}))
-    assert result == {
-        "ok": False,
-        "action": "Update",
-        "path": "conflict.txt",
-        "error": "context mismatch while applying patch",
-    }
+    assert result["ok"] is False
+    assert result["action"] == "Update"
+    assert result["path"] == "conflict.txt"
+    assert "context mismatch while applying patch" in result["error"]
 
 
 def test_apply_patch_rejects_binary_patch(tmp_path, monkeypatch):
@@ -195,12 +193,11 @@ def test_apply_patch_rejects_header_mismatch(tmp_path, monkeypatch):
 """
 
     result = json.loads(apply_patch_impl({"file_path": "a.txt", "patch": patch}))
-    assert result == {
-        "ok": False,
-        "action": "Update",
-        "path": "a.txt",
-        "error": "patch header path does not match file_path",
-    }
+    assert result["ok"] is False
+    assert result["action"] == "Update"
+    assert result["path"] == "a.txt"
+    assert result["error"].startswith("patch header path")
+    assert "a.txt" in result["error"]
 
 
 def test_apply_patch_rejects_unified_path_mismatch(tmp_path, monkeypatch):
@@ -219,9 +216,8 @@ def test_apply_patch_rejects_unified_path_mismatch(tmp_path, monkeypatch):
 """
 
     result = json.loads(apply_patch_impl({"file_path": "a.txt", "patch": patch}))
-    assert result == {
-        "ok": False,
-        "action": "Update",
-        "path": "a.txt",
-        "error": "unified diff paths do not match file_path",
-    }
+    assert result["ok"] is False
+    assert result["action"] == "Update"
+    assert result["path"] == "a.txt"
+    assert result["error"].startswith("unified diff path")
+    assert "old.txt" in result["error"]

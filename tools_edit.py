@@ -9,7 +9,8 @@ def edit_file_tool_def() -> dict:
         "name": "edit_file",
         "description": (
             "Make edits to a text file.\n"
-            "Replaces 'old_str' with 'new_str' in the given file. "
+            "Replaces EVERY exact occurrence of 'old_str' (including whitespace) with 'new_str'. "
+            "If multiple matches are found, all are replaced and a warning is returned. "
             "'old_str' and 'new_str' MUST be different. "
             "If the file does not exist and old_str == '', the file is created with new_str. "
             "Set dry_run=true to preview replacements and receive structured JSON feedback."
@@ -111,4 +112,3 @@ def edit_file_impl(input: Dict[str, Any]) -> str:
 
     Path(path).write_text(new_content, encoding="utf-8")
     return _build_response("replace", path, replacements=occurrences, warning=warning)
-

@@ -5,7 +5,7 @@ import os
 from dataclasses import dataclass
 from typing import Optional
 
-DEFAULT_MODEL = "claude-3-7-sonnet-latest"
+DEFAULT_MODEL = "claude-sonnet-4-5"
 DEFAULT_MAX_TOKENS = 1024
 
 

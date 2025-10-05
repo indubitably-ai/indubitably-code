@@ -13,7 +13,7 @@ from anthropic import Anthropic, RateLimitError
 from agent import Tool
 from agents_md import load_agents_md
 from config import load_anthropic_config
-from prompt import PromptPacker
+from prompt import PromptPacker, PackedPrompt
 from session import ContextSession, SessionSettings, load_session_settings
 
 
@@ -122,7 +122,7 @@ class AgentRunner:
         for turn_idx in range(1, self.options.max_turns + 1):
             packed = packer.pack()
             try:
-                response = self._call_with_backoff(packed.messages, backoff_seconds=2.0)
+                response = self._call_with_backoff(packed, backoff_seconds=2.0)
             except Exception:
                 if should_rollback:
                     context.rollback_last_turn()
@@ -200,19 +200,22 @@ class AgentRunner:
 
     def _call_with_backoff(
         self,
-        messages: List[Dict[str, Any]],
+        prompt: PackedPrompt,
         backoff_seconds: float,
     ) -> Any:
         wait = backoff_seconds
         retries = 0
         while True:
             try:
-                return self.client.messages.create(
-                    model=self.config.model,
-                    max_tokens=self.config.max_tokens,
-                    messages=messages,
-                    tools=[tool.to_definition() for tool in self.active_tools],
-                )
+                request: Dict[str, Any] = {
+                    "model": self.config.model,
+                    "max_tokens": self.config.max_tokens,
+                    "messages": prompt.messages,
+                    "tools": [tool.to_definition() for tool in self.active_tools],
+                }
+                if prompt.system:
+                    request["system"] = prompt.system
+                return self.client.messages.create(**request)
             except RateLimitError as exc:  # pragma: no cover - live API scenario
                 retries += 1
                 if retries > 5:
@@ -290,12 +293,19 @@ class AgentRunner:
         self._write_audit_event(event)
         self._handle_tool_debug(event)
 
-        tool_result = {
-            "type": "tool_result",
-            "tool_use_id": tool_use_id,
-            "content": result_str,
-            "is_error": is_error,
-        }
+        if self.context is not None:
+            tool_result = self.context.build_tool_result_block(
+                tool_use_id,
+                result_str,
+                is_error=is_error,
+            )
+        else:  # pragma: no cover - defensive fallback
+            tool_result = {
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": result_str,
+                "is_error": is_error,
+            }
 
         return event, tool_result
 

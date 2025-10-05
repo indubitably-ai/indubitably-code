@@ -17,7 +17,8 @@ def apply_patch_tool_def() -> dict:
         "description": (
             "Apply a structured V4A-style diff to a single file. Supports Add, Update, and Delete actions. "
             "Update supports multiple single-line replacements using '- ' for removals and '+ ' for additions. "
-            "Pass dry_run=true to validate the diff without modifying the file; responses include clear JSON errors when context mismatches occur."
+            "The tool detects rename hints in unified headers and will instruct you to call rename_file when needed. "
+            "Pass dry_run=true to validate the diff without modifying the file; responses include actionable JSON errors when context mismatches occur."
         ),
         "input_schema": {
             "type": "object",
@@ -281,6 +282,16 @@ def apply_patch_impl(input: Dict[str, Any]) -> str:
     action, header_path = _parse_header(patch)
     unified = _parse_unified_diff(patch)
 
+    rename_from: Optional[str] = None
+    rename_to: Optional[str] = None
+    if unified:
+        old_header = unified.get("old_file")
+        new_header = unified.get("new_file")
+        if old_header and new_header and old_header not in {"/dev/null"} and new_header not in {"/dev/null"}:
+            if _normalize_compare_path(old_header) != _normalize_compare_path(new_header):
+                rename_from = old_header
+                rename_to = new_header
+
     desired_action = (action or "Update").capitalize()
 
     # Reject binary patches up front
@@ -290,7 +301,18 @@ def apply_patch_impl(input: Dict[str, Any]) -> str:
 
     # Reject header mismatches to avoid accidental renames
     if header_path and _normalize_compare_path(header_path) != _normalize_compare_path(file_path):
-        return _build_error(desired_action, file_path, "patch header path does not match file_path", dry_run=dry_run)
+        rename_hint = ""
+        if rename_from and rename_to:
+            rename_hint = (
+                f" Detected rename from '{rename_from}' to '{rename_to}'. "
+                "Run rename_file first, then re-apply the patch."
+            )
+        return _build_error(
+            desired_action,
+            file_path,
+            f"patch header path '{header_path}' does not match file_path '{file_path}'.{rename_hint}",
+            dry_run=dry_run,
+        )
 
     # Prefer unified diff semantics when available
     if unified:
@@ -304,10 +326,16 @@ def apply_patch_impl(input: Dict[str, Any]) -> str:
             if header_value in (None, "/dev/null"):
                 continue
             if _normalize_compare_path(header_value) != compare_target:
+                rename_hint = ""
+                if rename_from and rename_to:
+                    rename_hint = (
+                        f" Detected rename from '{rename_from}' to '{rename_to}'. "
+                        "Use rename_file before applying this patch."
+                    )
                 return _build_error(
                     inferred_action.capitalize(),
                     file_path,
-                    "unified diff paths do not match file_path",
+                    f"unified diff path '{header_value}' does not match file_path '{file_path}'.{rename_hint}",
                     dry_run=dry_run,
                 )
 
@@ -337,7 +365,16 @@ def apply_patch_impl(input: Dict[str, Any]) -> str:
                 target.write_text(updated, encoding="utf-8")
             return _build_success(inferred_action.capitalize(), file_path)
         except Exception as exc:
-            return _build_error("Update", file_path, str(exc), dry_run=dry_run)
+            message = str(exc)
+            if isinstance(exc, ValueError):
+                if "context mismatch" in message or "deletion mismatch" in message or "beyond end of file" in message:
+                    message = (
+                        f"{message}. The file content likely diverged from the patch. "
+                        "Re-read the file or regenerate the diff after syncing."
+                    )
+                elif "overlapping hunks" in message:
+                    message = f"{message}. Split the patch into non-overlapping hunks and retry."
+            return _build_error("Update", file_path, message, dry_run=dry_run)
 
     if action.lower() == "delete":
         if dry_run:
@@ -383,4 +420,11 @@ def apply_patch_impl(input: Dict[str, Any]) -> str:
         target.write_text(new_content, encoding="utf-8")
         return _build_success("Update", file_path)
     except Exception as exc:
-        return _build_error("Update", file_path, str(exc), dry_run=dry_run)
+        message = str(exc)
+        if isinstance(exc, ValueError):
+            if "old line not found" in message:
+                message = (
+                    f"{message}. The patch context does not match the current file; "
+                    "ensure the file is up to date or regenerate the diff."
+                )
+        return _build_error("Update", file_path, message, dry_run=dry_run)

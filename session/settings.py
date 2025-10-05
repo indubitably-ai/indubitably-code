@@ -15,9 +15,9 @@ DEFAULT_CONFIG_PATHS: tuple[Path, ...] = (
 
 @dataclass(frozen=True)
 class ModelSettings:
-    name: str = "gpt-4.1"
-    context_tokens: int = 128_000
-    guardrail_tokens: int = 8_000
+    name: str = "claude-sonnet-4-5"
+    context_tokens: int = 200_000
+    guardrail_tokens: int = 20_000
 
     @property
     def window_tokens(self) -> int:

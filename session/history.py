@@ -207,7 +207,18 @@ class HistoryStore:
         self._rebuild_tool_hashes()
 
     def set_compacted_content(self, record: MessageRecord, *, text: str) -> None:
-        compact_content = [{"type": "text", "text": text}]
+        if record.kind == "tool_result" and record.content:
+            compact_content = []
+            for block in record.content:
+                if block.get("type") == "tool_result":
+                    new_block = dict(block)
+                    new_block["content"] = text
+                    compact_content.append(new_block)
+                else:
+                    compact_content.append({"type": "text", "text": text})
+        else:
+            compact_content = [{"type": "text", "text": text}]
+
         tokens = self._meter.estimate_messages(
             [{"role": record.role, "content": compact_content}]
         )

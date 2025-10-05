@@ -15,7 +15,7 @@ _ENCODER_ALIASES = {
     "gpt-4.1": "gpt-4o-mini",
     "gpt-4.1-mini": "gpt-4o-mini",
     "gpt-4o": "gpt-4o-mini",
-    "claude-3-7-sonnet-latest": "gpt-4o-mini",
+    "claude-sonnet-4-5": "gpt-4o-mini",
 }
 
 

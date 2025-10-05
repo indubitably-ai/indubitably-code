@@ -1,20 +1,31 @@
 """Interactive Anthropic agent with tool support for local development."""
 
+import os
+import select
 import sys
 import json
 import re
 import textwrap
 import time
+import threading
 from pathlib import Path
-from typing import Callable, Dict, Any, List, Iterable, Optional, Set
+from typing import Callable, Dict, Any, List, Iterable, Optional, Set, TextIO
 from anthropic import Anthropic, RateLimitError
 from pyfiglet import Figlet
 
 from agents_md import load_agents_md
 from config import load_anthropic_config
 from commands import handle_slash_command
-from prompt import PromptPacker
+from prompt import PromptPacker, PackedPrompt
 from session import ContextSession, load_session_settings
+
+
+try:  # pragma: no cover - platform guard
+    import termios
+    import tty
+except ImportError:  # pragma: no cover - Windows fallback
+    termios = None  # type: ignore[assignment]
+    tty = None  # type: ignore[assignment]
 
 
 ToolFunc = Callable[[Dict[str, Any]], str]
@@ -42,6 +53,102 @@ class Tool:
             "description": self.description,
             "input_schema": self.input_schema,
         }
+
+
+class EscapeListener:
+    """Detects ESC key presses while keeping normal line input usable."""
+
+    def __init__(self, stream: TextIO) -> None:
+        self.stream = stream
+        self._event = threading.Event()
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._orig_attrs: Optional[List[Any]] = None
+        self._fd: Optional[int] = None
+
+        isatty = getattr(stream, "isatty", None)
+        if callable(isatty):
+            try:
+                stream_is_tty = bool(isatty())
+            except Exception:  # pragma: no cover - defensive
+                stream_is_tty = False
+        else:
+            stream_is_tty = False
+
+        self._available = termios is not None and tty is not None and stream_is_tty
+
+        if self._available:
+            try:
+                self._fd = stream.fileno()
+            except (AttributeError, ValueError, OSError):  # pragma: no cover - defensive
+                self._available = False
+
+    def arm(self) -> bool:
+        if not self._available:
+            return False
+        if self._thread and self._thread.is_alive():
+            return True
+
+        assert self._fd is not None  # nosec - guarded by _available
+        try:
+            self._orig_attrs = termios.tcgetattr(self._fd)
+            tty.setcbreak(self._fd)
+        except Exception:  # pragma: no cover - defensive
+            self._available = False
+            return False
+
+        self._event.clear()
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._watch, name="esc-listener", daemon=True)
+        self._thread.start()
+        return True
+
+    def disarm(self) -> None:
+        if not self._available:
+            return
+
+        if self._thread and self._thread.is_alive():
+            self._stop_event.set()
+            self._thread.join(timeout=0.2)
+        self._thread = None
+
+        if self._fd is not None and self._orig_attrs is not None:
+            try:
+                termios.tcsetattr(self._fd, termios.TCSADRAIN, self._orig_attrs)
+            except Exception:  # pragma: no cover - defensive
+                pass
+        self._orig_attrs = None
+        self._stop_event.clear()
+        self._event.clear()
+
+    def consume_triggered(self) -> bool:
+        if not self._available:
+            return False
+        if self._event.is_set():
+            self._event.clear()
+            return True
+        return False
+
+    def _watch(self) -> None:
+        if self._fd is None:
+            return
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    rlist, _, _ = select.select([self._fd], [], [], 0.1)
+                except (OSError, ValueError):  # pragma: no cover - defensive
+                    break
+                if not rlist:
+                    continue
+                try:
+                    data = os.read(self._fd, 1)
+                except OSError:  # pragma: no cover - defensive
+                    break
+                if data == b"\x1b":
+                    self._event.set()
+                    break
+        finally:
+            self._stop_event.set()
 
 
 def run_agent(
@@ -89,129 +196,181 @@ def run_agent(
 
     backoff_seconds = 2.0
     rate_limit_retries = 0
-    while True:
-        added_user_this_turn = False
-        if read_user:
-            status_snapshot = context.status()
-            _print_prompt_menu(DIM, RESET, status_snapshot)
-            print(f"{BOLD}You ▸ {RESET}", end="", flush=True)
-            line = sys.stdin.readline()
-            if not line:
-                break
-            stripped = line.rstrip("\n")
-            if not stripped:
+    listener = EscapeListener(sys.stdin)
+
+    try:
+        while True:
+            added_user_this_turn = False
+            if read_user:
+                listener.disarm()
+                status_snapshot = context.status()
+                _print_prompt_menu(DIM, RESET, status_snapshot)
+                print(f"{BOLD}You ▸ {RESET}", end="", flush=True)
+                line = sys.stdin.readline()
+                if not line:
+                    break
+                stripped = line.rstrip("\n")
+                if not stripped:
+                    read_user = True
+                    continue
+                handled, command_message = handle_slash_command(stripped, context)
+                if handled:
+                    if command_message:
+                        output = f"{YELLOW}{command_message}{RESET}" if use_color else command_message
+                        print(output)
+                        _print_transcript(transcript_path, f"COMMAND: {command_message}")
+                    read_user = True
+                    continue
+                context.add_user_message(stripped)
+                added_user_this_turn = True
+                _print_transcript(transcript_path, f"USER: {stripped}")
+                listener.arm()
+            else:
+                listener.arm()
+
+            if listener.consume_triggered():
+                _notify_manual_interrupt(YELLOW, RESET, transcript_path, use_color)
                 read_user = True
                 continue
-            handled, command_message = handle_slash_command(stripped, context)
-            if handled:
-                if command_message:
-                    output = f"{YELLOW}{command_message}{RESET}" if use_color else command_message
-                    print(output)
-                    _print_transcript(transcript_path, f"COMMAND: {command_message}")
-                read_user = True
+
+            tool_defs = [t.to_definition() for t in tools]
+
+            try:
+                packed = packer.pack()
+                if debug_tool_use:
+                    _debug_print_prompt(packed, YELLOW, RESET, use_color)
+                request_kwargs: Dict[str, Any] = {
+                    "model": config.model,
+                    "max_tokens": config.max_tokens,
+                    "messages": packed.messages,
+                    "tools": tool_defs,
+                }
+                if packed.system:
+                    request_kwargs["system"] = packed.system
+                msg = client.messages.create(**request_kwargs)
+                backoff_seconds = 2.0
+                rate_limit_retries = 0
+            except RateLimitError as exc:  # pragma: no cover - requires live API
+                wait = min(backoff_seconds, 30.0)
+                print(
+                    f"Anthropic rate limit hit; retrying in {wait:.1f}s... ({exc})",
+                    file=sys.stderr,
+                )
+                time.sleep(wait)
+                backoff_seconds = min(backoff_seconds * 2, 60.0)
+                rate_limit_retries += 1
+                if rate_limit_retries > 5:
+                    print("Rate limit retries exhausted; aborting current turn.", file=sys.stderr)
+                    if added_user_this_turn:
+                        context.rollback_last_turn()
+                    read_user = True
+                    backoff_seconds = 2.0
+                    rate_limit_retries = 0
+                    continue
+                read_user = False
                 continue
-            context.add_user_message(stripped)
-            added_user_this_turn = True
-            _print_transcript(transcript_path, f"USER: {stripped}")
-
-        tool_defs = [t.to_definition() for t in tools]
-
-        try:
-            packed = packer.pack()
-            msg = client.messages.create(
-                model=config.model,
-                max_tokens=config.max_tokens,
-                messages=packed.messages,
-                tools=tool_defs,
-            )
-            backoff_seconds = 2.0
-            rate_limit_retries = 0
-        except RateLimitError as exc:  # pragma: no cover - requires live API
-            wait = min(backoff_seconds, 30.0)
-            print(
-                f"Anthropic rate limit hit; retrying in {wait:.1f}s... ({exc})",
-                file=sys.stderr,
-            )
-            time.sleep(wait)
-            backoff_seconds = min(backoff_seconds * 2, 60.0)
-            rate_limit_retries += 1
-            if rate_limit_retries > 5:
-                print("Rate limit retries exhausted; aborting current turn.", file=sys.stderr)
+            except Exception as exc:  # pragma: no cover - surfaced to user
+                print(f"Anthropic error: {exc}", file=sys.stderr)
                 if added_user_this_turn:
                     context.rollback_last_turn()
                 read_user = True
-                backoff_seconds = 2.0
-                rate_limit_retries = 0
                 continue
-            read_user = False
-            continue
-        except Exception as exc:  # pragma: no cover - surfaced to user
-            print(f"Anthropic error: {exc}", file=sys.stderr)
-            if added_user_this_turn:
-                context.rollback_last_turn()
-            read_user = True
-            continue
 
-        assistant_blocks = _normalize_content(msg.content)
-        context.add_assistant_message(assistant_blocks)
+            assistant_blocks = _normalize_content(msg.content)
+            context.add_assistant_message(assistant_blocks)
 
-        encountered_tool = False
-        for block_dict in assistant_blocks:
-            btype = block_dict.get("type")
-            if btype == "text":
-                text = block_dict.get("text", "")
-                _print_assistant_text(text, GREEN, RESET)
-                _print_transcript(transcript_path, f"SAMUS: {text}")
-            elif btype == "tool_use":
-                encountered_tool = True
-                tool_name = block_dict.get("name", "")
-                tool_input = block_dict.get("input", {})
-                tool_use_id = block_dict.get("id") or block_dict.get("tool_use_id", "tool")
+            interrupted = False
+            interrupt_notified = False
+            encountered_tool = False
+            tool_results_content: List[Dict[str, Any]] = []
 
-                _print_tool_invocation(
-                    tool_name,
-                    tool_input,
-                    CYAN,
-                    YELLOW,
-                    RESET,
-                    verbose=debug_tool_use,
-                )
+            for block_dict in assistant_blocks:
+                if not interrupted and listener.consume_triggered():
+                    interrupted = True
+                    if not interrupt_notified:
+                        _notify_manual_interrupt(YELLOW, RESET, transcript_path, use_color)
+                        interrupt_notified = True
 
-                impl = next((t for t in tools if t.name == tool_name), None)
-                if impl is None:
-                    result_str = "tool not found"
-                    is_error = True
-                else:
-                    try:
-                        result_str = impl.fn(tool_input)
-                        is_error = False
-                    except Exception as exc:  # pragma: no cover - defensive
-                        result_str = str(exc)
+                btype = block_dict.get("type")
+                if btype == "text":
+                    text = block_dict.get("text", "")
+                    _print_assistant_text(text, GREEN, RESET)
+                    _print_transcript(transcript_path, f"SAMUS: {text}")
+                elif btype == "tool_use":
+                    encountered_tool = True
+                    tool_name = block_dict.get("name", "")
+                    tool_input = block_dict.get("input", {})
+                    tool_use_id = block_dict.get("id") or block_dict.get("tool_use_id", "tool")
+
+                    _print_tool_invocation(
+                        tool_name,
+                        tool_input,
+                        CYAN,
+                        YELLOW,
+                        RESET,
+                        verbose=debug_tool_use,
+                    )
+
+                    impl = next((t for t in tools if t.name == tool_name), None)
+                    if impl is None:
+                        result_str = "tool not found"
                         is_error = True
+                        tool_skipped = False
+                    else:
+                        tool_skipped = interrupted
+                        if interrupted:
+                            result_str = "tool execution skipped due to user interrupt"
+                            is_error = True
+                        else:
+                            try:
+                                result_str = impl.fn(tool_input)
+                                is_error = False
+                            except Exception as exc:  # pragma: no cover - defensive
+                                result_str = str(exc)
+                                is_error = True
+                        if not interrupted and listener.consume_triggered():
+                            interrupted = True
+                            if not interrupt_notified:
+                                _notify_manual_interrupt(YELLOW, RESET, transcript_path, use_color)
+                                interrupt_notified = True
 
-                _print_tool_result(result_str, is_error, RED if is_error else GREEN, RESET, verbose=debug_tool_use)
-                transcript_label = "ERROR" if is_error else "RESULT"
-                _print_transcript(transcript_path, f"TOOL {tool_name} {transcript_label}: {result_str}")
+                    _print_tool_result(result_str, is_error, RED if is_error else GREEN, RESET, verbose=debug_tool_use)
+                    transcript_label = "ERROR" if is_error else "RESULT"
+                    _print_transcript(transcript_path, f"TOOL {tool_name} {transcript_label}: {result_str}")
 
-                context.add_tool_text_result(tool_use_id, result_str, is_error=is_error)
+                    tool_block = context.build_tool_result_block(
+                        tool_use_id,
+                        result_str,
+                        is_error=is_error,
+                    )
+                    tool_results_content.append(tool_block)
 
-                _record_tool_debug_event(
-                    debug_tool_use,
-                    debug_log_path,
-                    turn=tool_event_counter + 1,
-                    tool_name=tool_name,
-                    payload=tool_input,
-                    result=result_str,
-                    is_error=is_error,
-                    skipped=False,
-                )
+                    _record_tool_debug_event(
+                        debug_tool_use,
+                        debug_log_path,
+                        turn=tool_event_counter + 1,
+                        tool_name=tool_name,
+                        payload=tool_input,
+                        result=result_str,
+                        is_error=is_error,
+                        skipped=tool_skipped,
+                    )
 
-                tool_event_counter += 1
+                    tool_event_counter += 1
 
-        if not encountered_tool:
-            read_user = True
-        else:
-            read_user = False
+            if tool_results_content:
+                context.add_tool_results(tool_results_content, dedupe=False)
+
+            if interrupted and not interrupt_notified:
+                _notify_manual_interrupt(YELLOW, RESET, transcript_path, use_color)
+                interrupt_notified = True
+
+            if interrupted or not encountered_tool:
+                read_user = True
+            else:
+                read_user = False
+    finally:
+        listener.disarm()
 
 
 def _normalize_content(blocks: Iterable[Any]) -> List[Dict[str, Any]]:
@@ -395,3 +554,22 @@ def _print_prompt_menu(dim: str, reset: str, status: Optional[Dict[str, Any]] = 
         context_display = "Context left n/a"
     metrics = f"{dim}Tokens {tokens}/{window}  •  {context_display}{reset}" if dim or reset else f"Tokens {tokens}/{window}  •  {context_display}"
     print(metrics)
+
+
+def _debug_print_prompt(packed: "PackedPrompt", color: str, reset: str, use_color: bool) -> None:
+    prefix = color if use_color else ""
+    suffix = reset if use_color else ""
+    print(f"{prefix}[prompt-debug] system blocks: {len(packed.system)}{suffix}")
+    for idx, msg in enumerate(packed.messages):
+        role = msg.get("role")
+        kinds = ",".join(block.get("type", "?") for block in msg.get("content", []))
+        print(f"{prefix}[prompt-debug] {idx}: role={role} blocks=[{kinds}]{suffix}")
+
+
+def _notify_manual_interrupt(color: str, reset: str, transcript_path: Optional[str], use_color: bool) -> None:
+    message = "Agent paused; add guidance or press Enter to resume."
+    if color and use_color:
+        print(f"{color}⏸  {message}{reset}")
+    else:
+        print(f"⏸  {message}")
+    _print_transcript(transcript_path, "INTERRUPT: agent paused by user")

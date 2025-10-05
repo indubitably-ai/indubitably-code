@@ -14,6 +14,14 @@ def _make_settings(*, keep_last: int = 1) -> SessionSettings:
     )
 
 
+def test_default_model_window_matches_sonnet_guardrail():
+    settings = SessionSettings()
+    assert settings.model.name == "claude-sonnet-4-5"
+    assert settings.model.context_tokens == 200_000
+    assert settings.model.guardrail_tokens == 20_000
+    assert settings.model.window_tokens == 180_000
+
+
 def test_context_session_compacts_when_forced():
     session = ContextSession(_make_settings(keep_last=1))
     session.register_system_text("system guidance")
