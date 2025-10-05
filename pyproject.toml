@@ -17,6 +17,9 @@ indubitably-agent = "cli:main"
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+markers = [
+    "integration: tests that hit the live Anthropic API",
+]
 
 [build-system]
 requires = ["setuptools>=64", "wheel"]

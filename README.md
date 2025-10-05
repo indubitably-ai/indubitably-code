@@ -48,13 +48,13 @@ Slash commands are available in the interactive TUI to inspect or tweak the sess
 Session defaults live in TOML via `session/settings.py`. By default we load `~/.agent/config.toml` (or the path from `INDUBITABLY_SESSION_CONFIG`) and honour sections such as:
 ```toml
 [model]
-name = "gpt-4.1"
-context_tokens = 128000
+name = "claude-sonnet-4-5"
+context_tokens = 200000
 
 [compaction]
 auto = true
 keep_last_turns = 4
-target_tokens = 110000
+target_tokens = 180000
 
 [tools.limits]
 max_tool_tokens = 4000
@@ -73,7 +73,7 @@ Telemetry counters (`session/telemetry.py`) record token usage, compaction event
 uv sync
 export ANTHROPIC_API_KEY=your_key_here
 # optional overrides
-export ANTHROPIC_MODEL=claude-3-7-sonnet-latest
+export ANTHROPIC_MODEL=claude-sonnet-4-5
 export ANTHROPIC_MAX_TOKENS=2048
 ```
 
