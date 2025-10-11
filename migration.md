@@ -50,7 +50,446 @@ The indubitably-code project is a functional Python-based coding assistant with 
 
 ---
 
+## Phase 0: Test Infrastructure Foundation (NEW - CRITICAL)
+
+**Why First?**: The codex-rs test analysis reveals that **test infrastructure is as complex as production code**. Building it first enables:
+- Test-driven development for new architecture
+- Validation of each migration phase
+- Confidence in refactoring
+- Early detection of architectural issues
+
+### 0.1 Mock Response Infrastructure
+
+**File**: `tests/mocking/responses.py`
+
+**Purpose**: Build deterministic test responses that simulate the Anthropic API.
+
+```python
+from typing import List, Dict, Any
+import json
+
+def sse_event(event_type: str, data: Dict[str, Any]) -> str:
+    """Build a single SSE event."""
+    lines = [f"event: {event_type}"]
+    if data:
+        lines.append(f"data: {json.dumps(data)}")
+    lines.append("")
+    return "\n".join(lines) + "\n"
+
+def sse_stream(events: List[Dict[str, Any]]) -> str:
+    """Build an SSE stream from a list of events."""
+    stream = ""
+    for event in events:
+        event_type = event.get("type", "message")
+        stream += sse_event(event_type, event)
+    return stream
+
+# Event builders (critical for deterministic tests)
+def ev_content_block_start(index: int) -> Dict[str, Any]:
+    return {
+        "type": "content_block_start",
+        "index": index,
+        "content_block": {"type": "text", "text": ""}
+    }
+
+def ev_content_block_delta(index: int, text: str) -> Dict[str, Any]:
+    return {
+        "type": "content_block_delta",
+        "index": index,
+        "delta": {"type": "text_delta", "text": text}
+    }
+
+def ev_tool_use(tool_use_id: str, name: str, input_data: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "type": "content_block_start",
+        "content_block": {
+            "type": "tool_use",
+            "id": tool_use_id,
+            "name": name,
+            "input": input_data
+        }
+    }
+
+def ev_message_stop() -> Dict[str, Any]:
+    return {"type": "message_stop"}
+
+class MockAnthropicServer:
+    """HTTP server that mimics Anthropic API responses."""
+
+    def __init__(self):
+        self.responses: List[str] = []
+        self.requests: List[Dict[str, Any]] = []
+        self._call_count = 0
+
+    def add_response(self, events: List[Dict[str, Any]]):
+        """Queue a response for the next API call."""
+        self.responses.append(sse_stream(events))
+
+    def get_next_response(self) -> str:
+        """Get next queued response (for sequential mocking)."""
+        if self._call_count >= len(self.responses):
+            raise ValueError(f"No response queued for call {self._call_count}")
+        response = self.responses[self._call_count]
+        self._call_count += 1
+        return response
+
+    def record_request(self, request_body: Dict[str, Any]):
+        """Record request for verification."""
+        self.requests.append(request_body)
+
+    def get_tool_result(self, tool_use_id: str) -> Dict[str, Any]:
+        """Extract tool result from recorded requests."""
+        for req in self.requests:
+            for item in req.get("messages", []):
+                if item.get("role") == "user":
+                    for content in item.get("content", []):
+                        if content.get("type") == "tool_result" and content.get("tool_use_id") == tool_use_id:
+                            return content
+        raise ValueError(f"No tool result found for {tool_use_id}")
+```
+
+**Key Insight from codex-rs**: Sequential response mocking is ESSENTIAL for multi-turn conversation testing. Without this, you can't test turn flows.
+
+### 0.2 Test Harness
+
+**File**: `tests/harness/test_agent.py`
+
+**Purpose**: Provide isolated, controllable agent environment for testing.
+
+```python
+from pathlib import Path
+import tempfile
+from typing import Optional, Callable, Dict, Any
+from unittest.mock import Mock
+
+class TestAgentBuilder:
+    """Builder for creating test agent instances."""
+
+    def __init__(self):
+        self._config_mutators: List[Callable[[Dict[str, Any]], None]] = []
+
+    def with_config(self, mutator: Callable[[Dict[str, Any]], None]) -> "TestAgentBuilder":
+        """Add a config mutation function."""
+        self._config_mutators.append(mutator)
+        return self
+
+    async def build(self, mock_server: MockAnthropicServer) -> "TestAgent":
+        """Build the test agent with mock server."""
+        # Create isolated environment
+        home_dir = tempfile.TemporaryDirectory()
+        work_dir = tempfile.TemporaryDirectory()
+
+        # Base config
+        config = {
+            "model": "claude-sonnet-4",
+            "api_key": "test-key",
+            "api_base": f"http://localhost:{mock_server.port}",
+            "home_dir": home_dir.name,
+            "work_dir": work_dir.name,
+        }
+
+        # Apply mutations
+        for mutator in self._config_mutators:
+            mutator(config)
+
+        # Create agent
+        from agent_runner import AgentRunner
+        from tools.registry import build_tool_registry
+
+        registry = build_tool_registry(config)
+        runner = AgentRunner(config, registry, api_client=mock_server.client)
+
+        return TestAgent(
+            home_dir=home_dir,
+            work_dir=work_dir,
+            runner=runner,
+            mock_server=mock_server,
+            config=config
+        )
+
+class TestAgent:
+    """Test agent with isolated environment."""
+
+    def __init__(self, home_dir, work_dir, runner, mock_server, config):
+        self.home_dir = home_dir
+        self.work_dir = work_dir
+        self.runner = runner
+        self.mock_server = mock_server
+        self.config = config
+
+    def work_path(self, relative: str) -> Path:
+        """Get path in work directory."""
+        return Path(self.work_dir.name) / relative
+
+    async def run_turn(self, prompt: str) -> Dict[str, Any]:
+        """Execute a single turn."""
+        result = await self.runner.run(prompt)
+        return result
+
+    def cleanup(self):
+        """Clean up temp directories."""
+        self.home_dir.cleanup()
+        self.work_dir.cleanup()
+
+def test_agent() -> TestAgentBuilder:
+    """Create a test agent builder."""
+    return TestAgentBuilder()
+```
+
+**Usage Example**:
+
+```python
+@pytest.mark.asyncio
+async def test_shell_tool_execution():
+    # Setup
+    mock_server = MockAnthropicServer()
+    mock_server.add_response([
+        ev_tool_use("call-1", "run_terminal_cmd", {
+            "command": "echo hello",
+            "is_background": False
+        }),
+        ev_message_stop()
+    ])
+    mock_server.add_response([
+        ev_content_block_delta(0, "Command executed successfully"),
+        ev_message_stop()
+    ])
+
+    agent = await test_agent().build(mock_server)
+
+    try:
+        # Execute
+        await agent.run_turn("run echo hello")
+
+        # Verify
+        tool_result = mock_server.get_tool_result("call-1")
+        result = json.loads(tool_result["content"])
+        assert result["ok"] is True
+        assert "hello" in result["stdout"]
+    finally:
+        agent.cleanup()
+```
+
+**Key Insight**: This pattern provides the **foundation** for all other testing. Build it FIRST.
+
+### 0.3 Async Event Utilities
+
+**File**: `tests/utils/async_helpers.py`
+
+```python
+import asyncio
+from typing import Callable, TypeVar, Optional
+from datetime import timedelta
+
+T = TypeVar('T')
+
+async def wait_for_condition(
+    condition: Callable[[], bool],
+    timeout: timedelta = timedelta(seconds=30),
+    poll_interval: timedelta = timedelta(milliseconds=10)
+) -> None:
+    """Wait for a condition to become true."""
+    start = asyncio.get_event_loop().time()
+    timeout_seconds = timeout.total_seconds()
+
+    while not condition():
+        if asyncio.get_event_loop().time() - start > timeout_seconds:
+            raise TimeoutError(f"Condition not met within {timeout}")
+        await asyncio.sleep(poll_interval.total_seconds())
+
+async def wait_for_event(
+    event_stream,
+    predicate: Callable[[Any], bool],
+    timeout: timedelta = timedelta(seconds=30)
+) -> Any:
+    """Wait for a specific event from an async stream."""
+    start = asyncio.get_event_loop().time()
+    timeout_seconds = timeout.total_seconds()
+
+    async for event in event_stream:
+        if predicate(event):
+            return event
+        if asyncio.get_event_loop().time() - start > timeout_seconds:
+            raise TimeoutError(f"Event not received within {timeout}")
+```
+
+**Key Insight from codex-rs**: Never use `sleep()` in tests. Always use event-based synchronization.
+
+### 0.4 Parallelism Test Infrastructure
+
+**File**: `tests/utils/sync_helpers.py`
+
+```python
+import asyncio
+from typing import Dict
+from threading import Lock
+
+class Barrier:
+    """Async barrier for coordinating parallel tasks."""
+
+    def __init__(self, parties: int):
+        self.parties = parties
+        self._count = 0
+        self._condition = asyncio.Condition()
+
+    async def wait(self):
+        """Wait for all parties to arrive."""
+        async with self._condition:
+            self._count += 1
+            if self._count == self.parties:
+                self._condition.notify_all()
+                self._count = 0
+            else:
+                await self._condition.wait()
+
+# Global registry for test barriers
+_barriers: Dict[str, Barrier] = {}
+_barriers_lock = Lock()
+
+def get_barrier(barrier_id: str, parties: int) -> Barrier:
+    """Get or create a named barrier."""
+    with _barriers_lock:
+        if barrier_id not in _barriers:
+            _barriers[barrier_id] = Barrier(parties)
+        return _barriers[barrier_id]
+
+def clear_barrier(barrier_id: str):
+    """Remove a barrier (for test cleanup)."""
+    with _barriers_lock:
+        _barriers.pop(barrier_id, None)
+```
+
+**Test Tool for Parallelism**:
+
+```python
+# tools/test_sync_tool.py (only enabled in tests)
+async def test_sync_tool_impl(input_data: Dict[str, Any]) -> str:
+    """Tool that can synchronize with other instances via barriers."""
+    sleep_ms = input_data.get("sleep_after_ms", 0)
+    barrier_config = input_data.get("barrier")
+
+    # Sleep
+    if sleep_ms > 0:
+        await asyncio.sleep(sleep_ms / 1000.0)
+
+    # Barrier synchronization
+    if barrier_config:
+        barrier = get_barrier(
+            barrier_config["id"],
+            barrier_config["participants"]
+        )
+        await barrier.wait()
+
+    return json.dumps({"ok": True, "synced": barrier_config is not None})
+```
+
+**Key Insight from codex-rs**: Barriers are ESSENTIAL for testing parallel execution. Without them, timing assertions are unreliable.
+
+### 0.5 Timing Assertion Helpers
+
+**File**: `tests/utils/timing.py`
+
+```python
+from datetime import timedelta
+import time
+from typing import Callable, Awaitable
+
+async def measure_duration(
+    operation: Callable[[], Awaitable[None]]
+) -> timedelta:
+    """Measure how long an async operation takes."""
+    start = time.perf_counter()
+    await operation()
+    end = time.perf_counter()
+    return timedelta(seconds=end - start)
+
+def assert_parallel_execution(duration: timedelta, expected_single: timedelta):
+    """Assert that duration indicates parallel execution.
+
+    If two operations that each take `expected_single` ran in parallel,
+    total duration should be ~expected_single, not ~2*expected_single.
+    """
+    # Allow 50% overhead for runtime coordination
+    threshold = expected_single * 1.5
+    assert duration < threshold, \
+        f"Expected parallel execution (~{expected_single}), got {duration}"
+
+def assert_serial_execution(duration: timedelta, expected_single: timedelta, count: int):
+    """Assert that duration indicates serial execution."""
+    # Should take at least (count-0.5) * expected_single
+    threshold = expected_single * (count - 0.5)
+    assert duration >= threshold, \
+        f"Expected serial execution (>={threshold}), got {duration}"
+```
+
+**Usage**:
+
+```python
+@pytest.mark.asyncio
+async def test_parallel_tool_execution():
+    # Setup: two tools that each take 300ms
+    mock_server = MockAnthropicServer()
+    mock_server.add_response([
+        ev_tool_use("call-1", "test_sync_tool", {
+            "sleep_after_ms": 300,
+            "barrier": {"id": "test-barrier", "participants": 2}
+        }),
+        ev_tool_use("call-2", "test_sync_tool", {
+            "sleep_after_ms": 300,
+            "barrier": {"id": "test-barrier", "participants": 2}
+        }),
+        ev_message_stop()
+    ])
+
+    agent = await test_agent().build(mock_server)
+
+    try:
+        # Measure execution time
+        duration = await measure_duration(
+            lambda: agent.run_turn("test parallel")
+        )
+
+        # If parallel: ~300ms. If serial: ~600ms.
+        assert_parallel_execution(duration, timedelta(milliseconds=300))
+    finally:
+        agent.cleanup()
+        clear_barrier("test-barrier")
+```
+
+**Key Insight**: This is HOW you verify parallelism actually works. It's not obvious without timing + barriers.
+
+---
+
+**Migration Impact**: High - This is foundational infrastructure
+**Priority**: MUST DO FIRST
+**Time Estimate**: 1 week
+
+**Deliverables**:
+- [ ] Mock response builders (`responses.py`)
+- [ ] MockAnthropicServer with sequential responses
+- [ ] TestAgent harness with isolated environments
+- [ ] Async event utilities
+- [ ] Barrier synchronization infrastructure
+- [ ] Timing assertion helpers
+- [ ] Test sync tool for parallelism testing
+- [ ] Example tests demonstrating each pattern
+
+**Success Criteria**:
+- Can write a test that mocks a multi-turn conversation
+- Can write a test that verifies parallel tool execution
+- Can write a test with isolated filesystem
+- All tests pass reliably (no flakiness)
+
+**Critical Anti-Pattern to Avoid**:
+❌ **Don't skip this phase**. Without test infrastructure, you can't validate the migration. You'll be flying blind.
+
+---
+
 ## Phase 1: Foundation - Tool Architecture Refactor
+
+**Prerequisites**: Phase 0 complete
+
+**Testing Strategy**: Write tests FIRST for each component, then implement.
 
 ### 1.1 Create Tool Handler Protocol
 
@@ -1725,9 +2164,412 @@ class ShellHandler(ToolHandler):
 
 ---
 
+## Testing Philosophy & Strategy
+
+### Integration Tests > Unit Tests
+
+**Key Insight from codex-rs**: The test suite is ~50% integration tests, ~30% unit tests, ~20% E2E tests.
+
+**Why?** For AI agent harnesses, the value is in **component integration**:
+- Does the tool execute correctly in context?
+- Is output properly formatted and truncated?
+- Does error recovery work across the turn loop?
+- Are events emitted at the right times?
+
+**Unit tests struggle** because:
+- Components have many dependencies (session, tracker, context)
+- Mocking everything is brittle and high-maintenance
+- Real integration bugs slip through unit tests
+
+**Balance to Aim For**:
+```
+Unit Tests:       30% - Parsers, formatters, algorithms (pure functions)
+Integration:      50% - Tool execution, turn flows, error paths
+E2E Tests:        20% - CLI workflows, multi-turn conversations
+```
+
+### Test Coverage Gates
+
+**After Each Phase**:
+- ✅ **75%+ code coverage** for new code
+- ✅ **100% error path coverage** - every error type has a test
+- ✅ **No flaky tests** - all tests pass reliably 5+ times
+- ✅ **Fast execution** - full test suite < 30 seconds (with mocking)
+- ✅ **Clear failures** - test failures include diagnostic context
+
+**Critical Rule**: New code without tests doesn't get merged.
+
+---
+
+## Parallel Run Strategy (Validation Approach)
+
+**Problem**: How do you validate the new architecture without breaking existing functionality?
+
+**Solution**: Run old and new implementations in parallel, compare results.
+
+### Parallel Run Pattern
+
+```python
+class DualModeToolRegistry:
+    """Run tools in both old and new implementations, compare results."""
+
+    def __init__(self, old_tools, new_registry):
+        self.old_tools = old_tools
+        self.new_registry = new_registry
+        self.discrepancies = []
+
+    async def execute_tool(self, tool_name: str, args: Dict[str, Any]) -> str:
+        # Execute with old implementation
+        old_fn = self.old_tools.get(tool_name)
+        old_result = old_fn(args) if old_fn else "TOOL_NOT_FOUND"
+
+        # Execute with new implementation
+        new_handler = self.new_registry.get_handler(tool_name)
+        new_invocation = create_test_invocation(tool_name, args)
+        new_output = await new_handler.handle(new_invocation)
+        new_result = new_output.content
+
+        # Compare
+        if not results_equivalent(old_result, new_result):
+            self.discrepancies.append({
+                "tool": tool_name,
+                "args": args,
+                "old": old_result,
+                "new": new_result,
+            })
+            log_discrepancy(tool_name, old_result, new_result)
+
+        # Return old result (safe fallback during migration)
+        return old_result
+
+    def report_discrepancies(self) -> Dict[str, Any]:
+        """Generate report of all discrepancies found."""
+        return {
+            "total_calls": self.total_calls,
+            "discrepancies": len(self.discrepancies),
+            "discrepancy_rate": len(self.discrepancies) / self.total_calls,
+            "details": self.discrepancies,
+        }
+```
+
+**Usage**:
+
+```python
+# In production, run both implementations
+if os.getenv("DUAL_MODE_VALIDATION") == "true":
+    registry = DualModeToolRegistry(old_tools, new_registry)
+else:
+    registry = new_registry  # New implementation only
+
+# After collecting data
+report = registry.report_discrepancies()
+if report["discrepancy_rate"] < 0.01:  # Less than 1% discrepancies
+    print("✅ New implementation validated! Safe to switch.")
+else:
+    print(f"❌ {report['discrepancy_rate']:.1%} discrepancy rate. Investigate.")
+```
+
+**When to Use**:
+- Phase 1 → Phase 2 transition (new tool handlers vs old functions)
+- Phase 3 transition (parallel vs sequential execution)
+- Phase 4 transition (new output formatting)
+
+**Benefits**:
+- Catch regressions immediately
+- Build confidence in new implementation
+- Identify edge cases missed by tests
+- Safe rollback if issues discovered
+
+---
+
+## Anti-Patterns to Avoid
+
+### Anti-Pattern 1: Skipping Test Infrastructure
+
+❌ **Don't**:
+```python
+# Write production code first, tests later (maybe)
+def new_feature():
+    # Complex logic
+    pass
+
+# TODO: Write tests someday
+```
+
+✅ **Do**:
+```python
+# Test first, then implementation
+@pytest.mark.asyncio
+async def test_new_feature():
+    agent = await test_agent().build(mock_server)
+    result = await agent.run_feature()
+    assert result.success
+
+# Now implement to make test pass
+async def new_feature():
+    pass
+```
+
+**Why**: Without tests, you can't validate the migration. Build test infrastructure FIRST (Phase 0).
+
+---
+
+### Anti-Pattern 2: Over-Mocking
+
+❌ **Don't**:
+```python
+# Mock every internal function
+mock_parser = Mock()
+mock_formatter = Mock()
+mock_validator = Mock()
+mock_executor = Mock()
+# 50 lines of mock setup later...
+
+# Test becomes brittle, breaks on any refactor
+```
+
+✅ **Do**:
+```python
+# Mock external boundaries only
+mock_server = MockAnthropicServer()  # Mock API
+agent = await test_agent().build(mock_server)  # Mock environment
+
+# Real tool execution
+result = await agent.run_turn("command")
+
+# Test actual behavior, not mocks
+```
+
+**Why**: Mock at boundaries (API, filesystem), not internal abstractions. Internal mocking is brittle and provides false confidence.
+
+---
+
+### Anti-Pattern 3: Timing-Based Waits
+
+❌ **Don't**:
+```python
+await agent.run_turn("command")
+await asyncio.sleep(0.5)  # Hope it's done?
+assert result_is_ready()
+```
+
+✅ **Do**:
+```python
+await agent.run_turn("command")
+await wait_for_event(
+    agent.events,
+    lambda ev: ev.type == "turn_complete"
+)
+assert result_is_ready()
+```
+
+**Why**: Timing-based waits cause flaky tests. Always use event-based synchronization.
+
+---
+
+### Anti-Pattern 4: Giant Multi-Purpose Tests
+
+❌ **Don't**:
+```python
+@pytest.mark.asyncio
+async def test_everything():
+    # Test tool parsing
+    # Test tool execution
+    # Test error handling
+    # Test output formatting
+    # Test event emission
+    # Test multi-turn flow
+    # 300 lines later...
+```
+
+✅ **Do**:
+```python
+@pytest.mark.asyncio
+async def test_tool_executes_successfully():
+    # One thing, tested well
+    pass
+
+@pytest.mark.asyncio
+async def test_tool_handles_error():
+    # One error case
+    pass
+```
+
+**Why**: Small, focused tests are easier to write, understand, debug, and maintain.
+
+---
+
+### Anti-Pattern 5: Ignoring Error Paths
+
+❌ **Don't**:
+```python
+@pytest.mark.asyncio
+async def test_tool():
+    # Only test happy path
+    result = await tool.execute(valid_input)
+    assert result.success
+
+# No tests for:
+# - Invalid input
+# - Missing files
+# - Timeouts
+# - Sandbox violations
+```
+
+✅ **Do**:
+```python
+@pytest.mark.asyncio
+async def test_tool_success():
+    # Happy path
+    pass
+
+@pytest.mark.asyncio
+async def test_tool_invalid_input():
+    # Error path
+    pass
+
+@pytest.mark.asyncio
+async def test_tool_missing_file():
+    # Error path
+    pass
+
+@pytest.mark.asyncio
+async def test_tool_timeout():
+    # Error path
+    pass
+```
+
+**Why**: Error handling is critical code. Test it as thoroughly as happy paths.
+
+---
+
+### Anti-Pattern 6: No Test Coverage Gates
+
+❌ **Don't**:
+```python
+# Merge code without checking coverage
+git commit -m "Add new feature"
+git push
+# Hope for the best
+```
+
+✅ **Do**:
+```python
+# Check coverage before merge
+pytest --cov=src --cov-report=term-missing
+# Coverage: 82% ✅
+
+# Set minimum coverage in CI
+# pytest.ini
+[tool:pytest]
+addopts = --cov=src --cov-fail-under=75
+```
+
+**Why**: Coverage gates ensure code doesn't degrade over time. Set threshold at 75%+.
+
+---
+
+### Anti-Pattern 7: Property Testing Everything
+
+❌ **Don't**:
+```python
+# Use property testing for stateful, I/O-heavy code
+@given(st.text(), st.dictionaries(st.text(), st.text()))
+def test_tool_execution(command, env):
+    # Tool executes shell commands (side effects!)
+    # Filesystem state (not pure!)
+    # API calls (external dependencies!)
+    result = execute_tool(command, env)
+    # What even is the property to test?
+```
+
+✅ **Do**:
+```python
+# Property testing for pure functions only
+@given(st.text())
+def test_parse_never_panics(patch_text):
+    # Pure function, no side effects
+    result = parse_apply_patch(patch_text)
+    # Property: never panics, always returns ParseResult or error
+
+# Regular tests for stateful code
+@pytest.mark.asyncio
+async def test_tool_execution():
+    # Stateful, I/O-heavy
+    # Use integration test with mocks
+```
+
+**Why**: Property testing shines for pure functions. For stateful systems with I/O, use integration tests.
+
+---
+
+### Anti-Pattern 8: Flaky Tests Accepted
+
+❌ **Don't**:
+```bash
+# Test sometimes passes, sometimes fails
+pytest  # ✅ Pass
+pytest  # ❌ Fail (timeout)
+pytest  # ✅ Pass
+pytest  # ❌ Fail (race condition)
+
+# "It's just flaky, run it again"
+```
+
+✅ **Do**:
+```bash
+# Tests pass reliably
+pytest  # ✅ Pass
+pytest  # ✅ Pass
+pytest  # ✅ Pass
+pytest  # ✅ Pass
+
+# Flaky test? FIX IT IMMEDIATELY
+# - Use events, not timing
+# - Use barriers for coordination
+# - Use isolated environments
+```
+
+**Why**: Flaky tests erode confidence in the test suite. They're worse than no tests. Fix them ruthlessly.
+
+---
+
+## Updated Success Metrics
+
+### Performance
+- ✅ Parallel tool calls complete in 1/N time (N = parallelizable tools)
+- ✅ Output truncation reduces context usage by 50%+
+- ✅ Tool execution overhead < 50ms per call
+- ✅ **Test suite execution < 30 seconds with mocking**
+
+### Reliability
+- ✅ Test coverage > 75% (80%+ preferred)
+- ✅ **100% error path coverage**
+- ✅ **Zero flaky tests (5+ consecutive passes)**
+- ✅ Zero critical bugs in production
+- ✅ Graceful degradation on errors
+- ✅ Audit trail for all filesystem changes
+
+### Maintainability
+- ✅ Add new tool in < 30 minutes
+- ✅ **Add test for new tool in < 15 minutes**
+- ✅ Clear error messages for all failures
+- ✅ Self-documenting code with types
+- ✅ Comprehensive API documentation
+- ✅ **Test failures include diagnostic context**
+
+### User Experience
+- ✅ Consistent tool behavior
+- ✅ Predictable error handling
+- ✅ Configurable safety policies
+- ✅ Detailed telemetry for debugging
+- ✅ **Test coverage visible in documentation**
+
+---
+
 ## Phase 10: Migration Checklist
 
-### Priority 1: Core Architecture (Weeks 1-2)
+### Priority 0: Test Infrastructure (Week 0 - BEFORE ANYTHING ELSE)
 
 - [ ] Create tool handler protocol (`tools/handler.py`)
 - [ ] Implement tool registry (`tools/registry.py`)
