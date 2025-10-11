@@ -1,11 +1,15 @@
 import json
 import time
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Any, Dict, List, Optional
+
+from pydantic import ValidationError
+
+from tools.schemas import TODO_STATUSES, TodoWriteInput
+from session.turn_diff_tracker import TurnDiffTracker
 
 
 _STORE_PATH = Path(".session_todos.json")
-_ALLOWED_STATUSES = {"pending", "in_progress", "completed", "cancelled"}
 
 
 def todo_write_tool_def() -> dict:
@@ -67,7 +71,7 @@ def _save_store(store: Dict[str, Any]) -> None:
 def _validate_status(status: Optional[str]) -> Optional[str]:
     if status is None:
         return None
-    if status not in _ALLOWED_STATUSES:
+    if status not in TODO_STATUSES:
         raise ValueError(f"invalid status: {status}")
     return status
 
@@ -102,11 +106,18 @@ def _replace_todos(incoming: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return replaced
 
 
-def todo_write_impl(input: Dict[str, Any]) -> str:
-    merge = bool(input.get("merge", False))
-    todos_in = input.get("todos") or []
-    if not isinstance(todos_in, list):
-        raise ValueError("'todos' must be an array")
+def todo_write_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] = None) -> str:
+    try:
+        params = TodoWriteInput(**input)
+    except ValidationError as exc:
+        messages = []
+        for err in exc.errors():
+            loc = ".".join(str(part) for part in err.get("loc", ())) or "input"
+            messages.append(f"{loc}: {err.get('msg', 'invalid value')}")
+        raise ValueError("; ".join(messages)) from exc
+
+    merge = params.merge
+    todos_in = [todo.dump() for todo in params.todos]
 
     store = _load_store()
     existing: List[Dict[str, Any]] = store.get("todos", [])
@@ -114,6 +125,28 @@ def todo_write_impl(input: Dict[str, Any]) -> str:
     updated = _merge_todos(existing, todos_in) if merge else _replace_todos(todos_in)
 
     store["todos"] = updated
-    _save_store(store)
+    old_text: Optional[str] = None
+    if _STORE_PATH.exists():
+        try:
+            old_text = _STORE_PATH.read_text(encoding="utf-8")
+        except Exception:
+            old_text = None
+
+    if tracker is not None:
+        tracker.lock_file(_STORE_PATH)
+    try:
+        _save_store(store)
+        if tracker is not None:
+            new_text = json.dumps(store, ensure_ascii=False)
+            tracker.record_edit(
+                path=_STORE_PATH,
+                tool_name="todo_write",
+                action="update",
+                old_content=old_text,
+                new_content=new_text,
+            )
+    finally:
+        if tracker is not None:
+            tracker.unlock_file(_STORE_PATH)
 
     return json.dumps(store)

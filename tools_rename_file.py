@@ -3,7 +3,12 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
+
+from pydantic import ValidationError
+
+from tools.schemas import RenameFileInput
+from session.turn_diff_tracker import TurnDiffTracker
 
 
 def rename_file_tool_def() -> dict:
@@ -43,22 +48,24 @@ def rename_file_tool_def() -> dict:
     }
 
 
-def rename_file_impl(input: Dict[str, Any]) -> str:
-    source_value = (input.get("source_path") or "").strip()
-    dest_value = (input.get("dest_path") or "").strip()
-    if not source_value or not dest_value:
-        raise ValueError("'source_path' and 'dest_path' are required")
+def rename_file_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] = None) -> str:
+    try:
+        params = RenameFileInput(**input)
+    except ValidationError as exc:
+        messages = []
+        for err in exc.errors():
+            loc = ".".join(str(part) for part in err.get("loc", ())) or "input"
+            messages.append(f"{loc}: {err.get('msg', 'invalid value')}")
+        raise ValueError("; ".join(messages)) from exc
 
-    overwrite = bool(input.get("overwrite", False))
-    create_parent = True if input.get("create_dest_parent") is None else bool(input.get("create_dest_parent"))
-
-    dry_run = bool(input.get("dry_run", False))
+    source_value = params.source_path.strip()
+    dest_value = params.dest_path.strip()
+    overwrite = params.overwrite
+    create_parent = params.create_dest_parent
+    dry_run = params.dry_run
 
     source = Path(source_value)
     dest = Path(dest_value)
-
-    if source.resolve() == dest.resolve():
-        raise ValueError("source and destination paths are identical")
 
     if not source.exists():
         raise FileNotFoundError(source_value)
@@ -90,7 +97,30 @@ def rename_file_impl(input: Dict[str, Any]) -> str:
             "dry_run": True,
         })
 
-    os.replace(source, dest)
+    if tracker is not None:
+        tracker.lock_file(source)
+        dest_locked = False
+        if source.resolve() != dest.resolve():
+            tracker.lock_file(dest)
+            dest_locked = True
+    else:
+        dest_locked = False
+
+    try:
+        os.replace(source, dest)
+        if tracker is not None:
+            tracker.record_edit(
+                path=source,
+                tool_name="rename_file",
+                action="rename",
+                old_content=source_value,
+                new_content=dest_value,
+            )
+    finally:
+        if tracker is not None:
+            tracker.unlock_file(source)
+            if dest_locked:
+                tracker.unlock_file(dest)
 
     result = {
         "ok": True,
@@ -100,5 +130,3 @@ def rename_file_impl(input: Dict[str, Any]) -> str:
         "overwritten": bool(dest_existed),
     }
     return json.dumps(result)
-
-

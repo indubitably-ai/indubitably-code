@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
+
+from pydantic import ValidationError
+
+from tools.schemas import CreateFileInput
+from session.turn_diff_tracker import TurnDiffTracker
 
 
 _IF_EXISTS = {"error", "overwrite", "skip"}
@@ -44,22 +49,22 @@ def create_file_tool_def() -> dict:
     }
 
 
-def create_file_impl(input: Dict[str, Any]) -> str:
-    path_value = (input.get("path") or "").strip()
-    if not path_value:
-        raise ValueError("'path' is required")
+def create_file_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] = None) -> str:
+    try:
+        params = CreateFileInput(**input)
+    except ValidationError as exc:
+        messages = []
+        for err in exc.errors():
+            loc = ".".join(str(part) for part in err.get("loc", ())) or "input"
+            messages.append(f"{loc}: {err.get('msg', 'invalid value')}")
+        raise ValueError("; ".join(messages)) from exc
 
-    policy = (input.get("if_exists") or "error").strip().lower()
-    if policy not in _IF_EXISTS:
-        raise ValueError("invalid if_exists policy")
-
-    create_parents = True if input.get("create_parents") is None else bool(input.get("create_parents"))
-    encoding = (input.get("encoding") or "utf-8").strip() or "utf-8"
-    content = input.get("content")
-    if content is None:
-        content = ""
-
-    dry_run = bool(input.get("dry_run", False))
+    path_value = params.path.strip()
+    policy = params.if_exists
+    create_parents = params.create_parents
+    encoding = params.encoding or "utf-8"
+    content = params.content
+    dry_run = params.dry_run
 
     target = Path(path_value)
     existing = target.exists()
@@ -84,6 +89,12 @@ def create_file_impl(input: Dict[str, Any]) -> str:
             raise FileNotFoundError(f"parent directory missing: {parent}")
 
     bytes_written = len(content.encode(encoding, errors="replace"))
+    previous_content: Optional[str] = None
+    if existing and not dry_run:
+        try:
+            previous_content = target.read_text(encoding=encoding)
+        except Exception:
+            previous_content = None
 
     if dry_run:
         return json.dumps({
@@ -95,7 +106,23 @@ def create_file_impl(input: Dict[str, Any]) -> str:
             "dry_run": True,
         })
 
-    target.write_text(content, encoding=encoding)
+    if tracker is not None and not dry_run:
+        tracker.lock_file(target)
+
+    try:
+        target.write_text(content, encoding=encoding)
+    finally:
+        if tracker is not None and not dry_run:
+            tracker.unlock_file(target)
+
+    if tracker is not None and not dry_run:
+        tracker.record_edit(
+            path=target,
+            tool_name="create_file",
+            action="overwrite" if existing else "create",
+            old_content=previous_content,
+            new_content=content,
+        )
 
     return json.dumps({
         "ok": True,
@@ -104,5 +131,3 @@ def create_file_impl(input: Dict[str, Any]) -> str:
         "encoding": encoding,
         "bytes_written": bytes_written,
     })
-
-

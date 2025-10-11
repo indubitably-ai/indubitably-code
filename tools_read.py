@@ -1,6 +1,12 @@
-from typing import Dict, Any, Optional
-from collections import deque
+from __future__ import annotations
+
 import os
+from collections import deque
+from typing import Any, Dict, Optional
+
+from pydantic import ValidationError
+
+from tools.schemas import ReadFileInput
 
 
 def read_file_tool_def() -> dict:
@@ -103,40 +109,37 @@ def _read_tail_lines(path: str, tail_lines: int, encoding: str, errors: str) -> 
 
 
 def read_file_impl(input: Dict[str, Any]) -> str:
-    path = input.get("path", "")
-    if not path:
-        raise ValueError("missing 'path'")
+    try:
+        params = ReadFileInput(**input)
+    except ValidationError as exc:
+        # Match legacy behaviour by surfacing ValueError with readable message
+        messages = []
+        for err in exc.errors():
+            loc = ".".join(str(item) for item in err.get("loc", ())) or "input"
+            messages.append(f"{loc}: {err.get('msg', 'invalid value')}")
+        raise ValueError("; ".join(messages)) from exc
 
+    path = params.path
     if not os.path.exists(path):
         raise FileNotFoundError(path)
     if os.path.isdir(path):
         raise IsADirectoryError(path)
 
-    encoding = (input.get("encoding") or "utf-8").strip() or "utf-8"
-    errors = (input.get("errors") or "replace").strip() or "replace"
+    encoding = params.encoding or "utf-8"
+    errors = params.errors or "replace"
 
-    # Byte range takes precedence if provided
-    byte_offset = input.get("byte_offset")
-    byte_limit = input.get("byte_limit")
-    if byte_offset is not None or byte_limit is not None:
-        bo = int(byte_offset or 0)
-        bl = int(byte_limit) if byte_limit is not None else None
+    if params.byte_offset is not None or params.byte_limit is not None:
+        bo = params.byte_offset or 0
+        bl = params.byte_limit
         return _read_bytes_range(path, bo, bl, encoding, errors)
 
-    # Tail lines next
-    tail_lines = input.get("tail_lines")
-    if tail_lines is not None:
-        return _read_tail_lines(path, int(tail_lines), encoding, errors)
+    if params.tail_lines is not None:
+        return _read_tail_lines(path, params.tail_lines, encoding, errors)
 
-    # Line range
-    offset = input.get("offset")
-    limit = input.get("limit")
-    if offset is not None or limit is not None:
-        start = int(offset or 1)
-        lim = int(limit) if limit is not None else None
+    if params.offset is not None or params.limit is not None:
+        start = params.offset or 1
+        lim = params.limit
         return _read_lines_range(path, start, lim, encoding, errors)
 
-    # Full file
     return _read_full_text(path, encoding, errors)
-
 

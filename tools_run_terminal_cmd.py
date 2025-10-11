@@ -1,11 +1,18 @@
+from __future__ import annotations
+
+import json
 import os
 import shlex
-import json
+import subprocess
 import time
 import uuid
-import subprocess
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
+
+from pydantic import ValidationError
+
+from tools.output import ExecOutput, format_exec_output
+from tools.schemas import RunTerminalCmdInput
 
 
 _DEF_SHELL = os.environ.get("SHELL") or "/bin/zsh"
@@ -87,6 +94,7 @@ def _run_foreground(
     env_map = _merge_env(env)
     env_map.setdefault("TERM", "xterm-256color")
 
+    start = time.time()
     try:
         completed = subprocess.run(
             command,
@@ -99,21 +107,23 @@ def _run_foreground(
             timeout=timeout,
             input=stdin_data,
         )
-        result = {
-            "ok": completed.returncode == 0,
-            "returncode": completed.returncode,
-            "stdout": completed.stdout,
-            "stderr": completed.stderr,
-        }
+        duration = time.time() - start
+        exec_output = ExecOutput(
+            exit_code=completed.returncode,
+            duration_seconds=duration,
+            output=(completed.stdout or "") + (completed.stderr or ""),
+            timed_out=False,
+        )
+        return format_exec_output(exec_output)
     except subprocess.TimeoutExpired as exc:
-        result = {
-            "ok": False,
-            "error": "timeout",
-            "timeout": timeout,
-            "stdout": exc.stdout or "",
-            "stderr": exc.stderr or "",
-        }
-    return json.dumps(result)
+        duration = time.time() - start
+        exec_output = ExecOutput(
+            exit_code=-1,
+            duration_seconds=duration,
+            output=(exc.stdout or "") + (exc.stderr or ""),
+            timed_out=True,
+        )
+        return format_exec_output(exec_output)
 
 
 def _run_background(
@@ -151,47 +161,48 @@ def _run_background(
         cwd=cwd or None,
     )
 
-    result = {
-        "ok": True,
-        "job_id": job_id,
-        "pid": proc.pid,
-        "stdout_log": str(stdout_path),
-        "stderr_log": str(stderr_path),
-        "hint": "Follow logs with: tail -f PATH",
-    }
-    return json.dumps(result)
+    summary_lines = [
+        "background command dispatched",
+        f"job_id: {job_id}",
+        f"pid: {proc.pid}",
+        f"stdout_log: {stdout_path}",
+        f"stderr_log: {stderr_path}",
+        "hint: tail -f <log-path>",
+    ]
+    exec_output = ExecOutput(
+        exit_code=0,
+        duration_seconds=0.0,
+        output="\n".join(summary_lines) + "\n",
+        timed_out=False,
+    )
+    return format_exec_output(exec_output)
 
 
 def run_terminal_cmd_impl(input: Dict[str, Any]) -> str:
-    command = input.get("command", "").strip()
+    try:
+        params = RunTerminalCmdInput(**input)
+    except ValidationError as exc:
+        messages = []
+        for err in exc.errors():
+            loc = ".".join(str(part) for part in err.get("loc", ())) or "input"
+            messages.append(f"{loc}: {err.get('msg', 'invalid value')}")
+        raise ValueError("; ".join(messages)) from exc
+
+    command = params.command.strip()
     if not command:
-        raise ValueError("missing 'command'")
+        raise ValueError("command must contain text")
 
-    is_background = bool(input.get("is_background", False))
-    cwd = (input.get("cwd") or "").strip() or None
+    is_background = params.is_background
+    cwd = (params.cwd or "").strip() or None
+    env_overrides = {str(k): str(v) for k, v in (params.env or {}).items()}
 
-    env_input = input.get("env") or {}
-    if not isinstance(env_input, dict):
-        raise ValueError("env must be an object of key/value strings")
-    env_overrides = {str(k): str(v) for k, v in env_input.items()}
-
-    shell_override = (input.get("shell") or "").strip() or None
+    shell_override = (params.shell or "").strip() or None
     shell_executable = shell_override or _DEF_SHELL
 
-    timeout_val = input.get("timeout")
-    if timeout_val is not None:
-        try:
-            timeout_val = float(timeout_val)
-            if timeout_val < 0:
-                raise ValueError
-        except ValueError as exc:
-            raise ValueError("timeout must be a non-negative number") from exc
-
-    stdin_data = input.get("stdin")
+    timeout_val = params.timeout
+    stdin_data = params.stdin
     if stdin_data is not None:
         stdin_data = str(stdin_data)
-        if is_background:
-            raise ValueError("stdin is only supported for foreground commands")
 
     # Basic guardrails: discourage obviously interactive programs in foreground
     interactive_bins = {"vim", "nano", "top", "htop", "less", "more"}

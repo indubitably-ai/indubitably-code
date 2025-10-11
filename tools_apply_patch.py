@@ -1,9 +1,14 @@
-import os
 import json
-import shutil
+import os
 import re
+import shutil
 from pathlib import Path
-from typing import Dict, Any, List, Tuple, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+from pydantic import ValidationError
+
+from tools.schemas import ApplyPatchInput
+from session.turn_diff_tracker import TurnDiffTracker
 
 
 HEADER_PREFIX = "*** "
@@ -53,10 +58,14 @@ def _extract_add_content(patch: str) -> str:
     for line in patch.splitlines():
         if line.startswith(HEADER_PREFIX) or line.startswith("@@"):
             continue
-        if line.startswith("- ") or line.startswith("+ "):
-            # diff lines are not treated as literal content for Add
+        if line.startswith("+"):
+            content_lines.append(line[1:])
+            continue
+        if line.startswith("-"):
             continue
         content_lines.append(line)
+    if not content_lines:
+        return ""
     return "\n".join(content_lines).rstrip("\n") + "\n"
 
 
@@ -158,6 +167,16 @@ def _detect_binary_patch(patch: str) -> Optional[str]:
 
 def _normalize_compare_path(path: str) -> str:
     return os.path.normcase(os.path.normpath(path))
+
+
+def _paths_equivalent(header_path: str, file_path: str) -> bool:
+    header_norm = _normalize_compare_path(header_path)
+    file_norm = _normalize_compare_path(file_path)
+    if header_norm == file_norm:
+        return True
+    if os.path.basename(header_norm) == os.path.basename(file_norm):
+        return True
+    return False
 
 
 def _build_success(action: str, path: str, *, dry_run: bool = False, note: Optional[str] = None) -> str:
@@ -270,13 +289,19 @@ def _infer_unified_action(
     return "update"
 
 
-def apply_patch_impl(input: Dict[str, Any]) -> str:
-    file_path = input.get("file_path", "").strip()
-    patch = input.get("patch", "")
-    if not file_path or not patch:
-        raise ValueError("missing 'file_path' or 'patch'")
+def apply_patch_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] = None) -> str:
+    try:
+        params = ApplyPatchInput(**input)
+    except ValidationError as exc:
+        messages = []
+        for err in exc.errors():
+            loc = ".".join(str(part) for part in err.get("loc", ())) or "input"
+            messages.append(f"{loc}: {err.get('msg', 'invalid value')}")
+        raise ValueError("; ".join(messages)) from exc
 
-    dry_run = bool(input.get("dry_run", False))
+    file_path = params.file_path.strip()
+    patch = params.patch
+    dry_run = params.dry_run
 
     target = Path(file_path)
     action, header_path = _parse_header(patch)
@@ -300,19 +325,20 @@ def apply_patch_impl(input: Dict[str, Any]) -> str:
         return _build_error(desired_action, file_path, "binary patches are not supported", dry_run=dry_run)
 
     # Reject header mismatches to avoid accidental renames
-    if header_path and _normalize_compare_path(header_path) != _normalize_compare_path(file_path):
-        rename_hint = ""
-        if rename_from and rename_to:
-            rename_hint = (
-                f" Detected rename from '{rename_from}' to '{rename_to}'. "
-                "Run rename_file first, then re-apply the patch."
+    if header_path and header_path not in ("/dev/null", ""):
+        if not _paths_equivalent(header_path, file_path):
+            rename_hint = ""
+            if rename_from and rename_to:
+                rename_hint = (
+                    f" Detected rename from '{rename_from}' to '{rename_to}'. "
+                    "Run rename_file first, then re-apply the patch."
+                )
+            return _build_error(
+                desired_action,
+                file_path,
+                f"patch header path '{header_path}' does not match file_path '{file_path}'.{rename_hint}",
+                dry_run=dry_run,
             )
-        return _build_error(
-            desired_action,
-            file_path,
-            f"patch header path '{header_path}' does not match file_path '{file_path}'.{rename_hint}",
-            dry_run=dry_run,
-        )
 
     # Prefer unified diff semantics when available
     if unified:
@@ -325,7 +351,7 @@ def apply_patch_impl(input: Dict[str, Any]) -> str:
         for header_value in (old_header, new_header):
             if header_value in (None, "/dev/null"):
                 continue
-            if _normalize_compare_path(header_value) != compare_target:
+            if not _paths_equivalent(header_value, file_path):
                 rename_hint = ""
                 if rename_from and rename_to:
                     rename_hint = (
@@ -343,13 +369,32 @@ def apply_patch_impl(input: Dict[str, Any]) -> str:
             if dry_run:
                 note = None if file_exists else "file did not exist"
                 return _build_success("Delete", file_path, dry_run=True, note=note)
+            existing_text: Optional[str] = None
+            if target.exists():
+                try:
+                    existing_text = target.read_text(encoding="utf-8")
+                except Exception:
+                    existing_text = None
             try:
+                if tracker is not None:
+                    tracker.lock_file(target)
                 target.unlink()
+                if tracker is not None:
+                    tracker.record_edit(
+                        path=target,
+                        tool_name="apply_patch",
+                        action="delete",
+                        old_content=existing_text,
+                        new_content=None,
+                    )
                 return _build_success("Delete", file_path)
             except FileNotFoundError:
                 return _build_success("Delete", file_path, note="file did not exist")
             except Exception as exc:
                 return _build_error("Delete", file_path, str(exc), dry_run=dry_run)
+            finally:
+                if tracker is not None:
+                    tracker.unlock_file(target)
 
         try:
             original = target.read_text(encoding="utf-8") if file_exists else ""
@@ -357,12 +402,31 @@ def apply_patch_impl(input: Dict[str, Any]) -> str:
             if dry_run:
                 return _build_success(inferred_action.capitalize(), file_path, dry_run=True)
             _ensure_parent_dirs(target)
-            if file_exists:
-                temp_path = target.with_suffix(target.suffix + ".patch.tmp")
-                _apply_unified_diff_stream(target, unified["hunks"], temp_path)
-                temp_path.replace(target)
-            else:
-                target.write_text(updated, encoding="utf-8")
+            if tracker is not None:
+                tracker.lock_file(target)
+            try:
+                if file_exists:
+                    temp_path = target.with_suffix(target.suffix + ".patch.tmp")
+                    _apply_unified_diff_stream(target, unified["hunks"], temp_path)
+                    temp_path.replace(target)
+                else:
+                    target.write_text(updated, encoding="utf-8")
+
+                if tracker is not None:
+                    try:
+                        new_text = target.read_text(encoding="utf-8")
+                    except Exception:
+                        new_text = updated
+                    tracker.record_edit(
+                        path=target,
+                        tool_name="apply_patch",
+                        action=inferred_action,
+                        old_content=original if file_exists else None,
+                        new_content=new_text,
+                    )
+            finally:
+                if tracker is not None:
+                    tracker.unlock_file(target)
             return _build_success(inferred_action.capitalize(), file_path)
         except Exception as exc:
             message = str(exc)
@@ -380,13 +444,32 @@ def apply_patch_impl(input: Dict[str, Any]) -> str:
         if dry_run:
             note = None if target.exists() else "file did not exist"
             return _build_success("Delete", file_path, dry_run=True, note=note)
+        existing_text: Optional[str] = None
+        if target.exists():
+            try:
+                existing_text = target.read_text(encoding="utf-8")
+            except Exception:
+                existing_text = None
         try:
+            if tracker is not None:
+                tracker.lock_file(target)
             target.unlink()
+            if tracker is not None:
+                tracker.record_edit(
+                    path=target,
+                    tool_name="apply_patch",
+                    action="delete",
+                    old_content=existing_text,
+                    new_content=None,
+                )
             return _build_success("Delete", file_path)
         except FileNotFoundError:
             return _build_success("Delete", file_path, note="file did not exist")
         except Exception as exc:
             return _build_error("Delete", file_path, str(exc), dry_run=dry_run)
+        finally:
+            if tracker is not None:
+                tracker.unlock_file(target)
 
     if action.lower() == "add":
         try:
@@ -394,14 +477,29 @@ def apply_patch_impl(input: Dict[str, Any]) -> str:
             if dry_run:
                 return _build_success("Add", file_path, dry_run=True)
             _ensure_parent_dirs(target)
-            target.write_text(content, encoding="utf-8")
+            if tracker is not None:
+                tracker.lock_file(target)
+            try:
+                target.write_text(content, encoding="utf-8")
+                if tracker is not None:
+                    tracker.record_edit(
+                        path=target,
+                        tool_name="apply_patch",
+                        action="add",
+                        old_content=None,
+                        new_content=content,
+                    )
+            finally:
+                if tracker is not None:
+                    tracker.unlock_file(target)
             return _build_success("Add", file_path)
         except Exception as exc:
             return _build_error("Add", file_path, str(exc), dry_run=dry_run)
 
     # Default to Update when header missing or 'Update'
     try:
-        existing = target.read_text(encoding="utf-8") if target.exists() else ""
+        file_existed = target.exists()
+        existing = target.read_text(encoding="utf-8") if file_existed else ""
 
         replacements = _collect_line_replacements(patch)
         if replacements:
@@ -417,7 +515,21 @@ def apply_patch_impl(input: Dict[str, Any]) -> str:
             return _build_success("Update", file_path, dry_run=True)
 
         _ensure_parent_dirs(target)
-        target.write_text(new_content, encoding="utf-8")
+        if tracker is not None:
+            tracker.lock_file(target)
+        try:
+            target.write_text(new_content, encoding="utf-8")
+            if tracker is not None:
+                tracker.record_edit(
+                    path=target,
+                    tool_name="apply_patch",
+                    action="update",
+                    old_content=existing if file_existed else None,
+                    new_content=new_content,
+                )
+        finally:
+            if tracker is not None:
+                tracker.unlock_file(target)
         return _build_success("Update", file_path)
     except Exception as exc:
         message = str(exc)

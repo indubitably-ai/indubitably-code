@@ -13,6 +13,7 @@ from .settings import (
     load_session_settings,
 )
 from .telemetry import SessionTelemetry
+from .turn_diff_tracker import FileEdit, TurnDiffTracker
 from .token_meter import TokenMeter
 
 __all__ = [
@@ -32,4 +33,6 @@ __all__ = [
     "SessionTelemetry",
     "TokenMeter",
     "load_session_settings",
+    "TurnDiffTracker",
+    "FileEdit",
 ]

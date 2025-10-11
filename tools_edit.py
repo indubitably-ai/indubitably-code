@@ -1,7 +1,15 @@
-import os
+from __future__ import annotations
+
 import json
+import os
+
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any, Dict, Optional
+
+from pydantic import ValidationError
+
+from tools.schemas import EditFileInput
+from session.turn_diff_tracker import TurnDiffTracker
 
 
 def edit_file_tool_def() -> dict:
@@ -54,29 +62,55 @@ def _build_response(
     return json.dumps(payload)
 
 
-def _create_new_file(file_path: str, content: str, *, dry_run: bool = False) -> str:
+def _create_new_file(
+    file_path: str,
+    content: str,
+    *,
+    dry_run: bool = False,
+    tracker: Optional[TurnDiffTracker] = None,
+) -> str:
     if dry_run:
         return _build_response("create", file_path, dry_run=True)
     p = Path(file_path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(content, encoding="utf-8")
+    if tracker is not None:
+        tracker.lock_file(p)
+    try:
+        p.write_text(content, encoding="utf-8")
+    finally:
+        if tracker is not None:
+            tracker.unlock_file(p)
+
+    if tracker is not None:
+        tracker.record_edit(
+            path=p,
+            tool_name="edit_file",
+            action="create",
+            old_content=None,
+            new_content=content,
+        )
     return _build_response("create", file_path)
 
 
 
-def edit_file_impl(input: Dict[str, Any]) -> str:
-    path = input.get("path", "")
-    old = input.get("old_str", None)
-    new = input.get("new_str", None)
+def edit_file_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] = None) -> str:
+    try:
+        params = EditFileInput(**input)
+    except ValidationError as exc:
+        messages = []
+        for err in exc.errors():
+            loc = ".".join(str(part) for part in err.get("loc", ())) or "input"
+            messages.append(f"{loc}: {err.get('msg', 'invalid value')}")
+        raise ValueError("; ".join(messages)) from exc
 
-    if not path or old is None or new is None or old == new:
-        raise ValueError("invalid input parameters")
-
-    dry_run = bool(input.get("dry_run", False))
+    path = params.path
+    old = params.old_str
+    new = params.new_str
+    dry_run = params.dry_run
 
     if not os.path.exists(path):
         if old == "":
-            return _create_new_file(path, new, dry_run=dry_run)
+            return _create_new_file(path, new, dry_run=dry_run, tracker=tracker)
         raise FileNotFoundError(path)
 
     content = Path(path).read_text(encoding="utf-8")
@@ -88,7 +122,21 @@ def edit_file_impl(input: Dict[str, Any]) -> str:
     if old == "":
         if dry_run:
             return _build_response("replace", path, dry_run=True, warning=warning)
-        Path(path).write_text(new, encoding="utf-8")
+        if tracker is not None:
+            tracker.lock_file(path)
+        try:
+            Path(path).write_text(new, encoding="utf-8")
+        finally:
+            if tracker is not None:
+                tracker.unlock_file(path)
+        if tracker is not None:
+            tracker.record_edit(
+                path=path,
+                tool_name="edit_file",
+                action="replace",
+                old_content=content,
+                new_content=new,
+            )
         return _build_response("replace", path, warning=warning)
 
     occurrences = content.count(old)
@@ -110,5 +158,21 @@ def edit_file_impl(input: Dict[str, Any]) -> str:
             warning=warning,
         )
 
-    Path(path).write_text(new_content, encoding="utf-8")
+    if tracker is not None:
+        tracker.lock_file(path)
+    try:
+        Path(path).write_text(new_content, encoding="utf-8")
+    finally:
+        if tracker is not None:
+            tracker.unlock_file(path)
+
+    if tracker is not None:
+        tracker.record_edit(
+            path=path,
+            tool_name="edit_file",
+            action="replace",
+            old_content=content,
+            new_content=new_content,
+        )
+
     return _build_response("replace", path, replacements=occurrences, warning=warning)

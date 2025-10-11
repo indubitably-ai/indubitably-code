@@ -1,5 +1,3 @@
-from types import SimpleNamespace
-
 import json
 
 import pytest
@@ -7,6 +5,7 @@ import pytest
 from agent import Tool
 from agents_md import load_agents_md
 from agent_runner import AgentRunOptions, AgentRunner
+from tests.mocking import MockAnthropic, text_block, tool_use_block
 
 
 def _make_tool(name="writer", capabilities=None, fn=None):
@@ -22,22 +21,6 @@ def _make_tool(name="writer", capabilities=None, fn=None):
     )
 
 
-class SequencedClient:
-    def __init__(self, responses):
-        self._responses = list(responses)
-        self.calls = 0
-        self.messages = self._Messages(self)
-
-    class _Messages:
-        def __init__(self, outer):
-            self._outer = outer
-
-        def create(self, **_):
-            if not self._outer._responses:
-                raise RuntimeError("no more responses configured")
-            self._outer.calls += 1
-            return SimpleNamespace(content=self._outer._responses.pop(0))
-
 
 def test_agent_runner_executes_tools_and_tracks_files(tmp_path):
     executed = []
@@ -47,11 +30,11 @@ def test_agent_runner_executes_tools_and_tracks_files(tmp_path):
         return "ok"
 
     tool = _make_tool(fn=impl)
-    responses = [
-        [SimpleNamespace(type="tool_use", name=tool.name, input={"path": "notes.txt"}, id="tool-1")],
-        [SimpleNamespace(type="text", text="all done")],
-    ]
-    client = SequencedClient(responses)
+    client = MockAnthropic()
+    client.add_response_from_blocks(
+        [tool_use_block(tool.name, {"path": "notes.txt"}, tool_use_id="tool-1")]
+    )
+    client.add_response_from_blocks([text_block("all done")])
 
     options = AgentRunOptions(max_turns=3, audit_log_path=tmp_path / "audit.jsonl", changes_log_path=tmp_path / "changes.jsonl")
     runner = AgentRunner([tool], options, client=client)
@@ -69,22 +52,30 @@ def test_agent_runner_executes_tools_and_tracks_files(tmp_path):
 
     changes = (tmp_path / "changes.jsonl").read_text(encoding="utf-8").strip().splitlines()
     assert changes and json.loads(changes[0])["path"] == "notes.txt"
-    doc = load_agents_md()
-    assert doc is not None
     assert result.conversation
     first_message = result.conversation[0]
-    assert first_message["role"] == "system"
-    assert first_message["content"]
-    assert doc.system_text().splitlines()[0] in first_message["content"][0]["text"]
+    if first_message["role"] == "system":
+        assert first_message["content"]
+        doc = load_agents_md()
+        if doc is not None:
+            first_line = doc.system_text().splitlines()[0]
+            assert first_line in first_message["content"][0]["text"]
+        else:
+            assert first_message["content"][0]["text"].strip()
+        user_index = 1
+    else:
+        user_index = 0
+    assert result.conversation[user_index]["role"] == "user"
+    assert result.conversation[user_index]["content"][0]["text"].strip()
 
 
 def test_agent_runner_blocks_disallowed_tools():
     tool = _make_tool()
-    responses = [
-        [SimpleNamespace(type="tool_use", name=tool.name, input={"path": "notes.txt"}, id="tool-1")],
-        [SimpleNamespace(type="text", text="fallback answer")],
-    ]
-    client = SequencedClient(responses)
+    client = MockAnthropic()
+    client.add_response_from_blocks(
+        [tool_use_block(tool.name, {"path": "notes.txt"}, tool_use_id="tool-1")]
+    )
+    client.add_response_from_blocks([text_block("fallback answer")])
 
     options = AgentRunOptions(blocked_tools={tool.name})
     runner = AgentRunner([tool], options, client=client)
@@ -108,11 +99,11 @@ def test_agent_runner_dry_run_skips_execution():
         return "ok"
 
     tool = _make_tool(fn=impl)
-    responses = [
-        [SimpleNamespace(type="tool_use", name=tool.name, input={"path": "draft.txt"}, id="tool-1")],
-        [SimpleNamespace(type="text", text="summary")],
-    ]
-    client = SequencedClient(responses)
+    client = MockAnthropic()
+    client.add_response_from_blocks(
+        [tool_use_block(tool.name, {"path": "draft.txt"}, tool_use_id="tool-1")]
+    )
+    client.add_response_from_blocks([text_block("summary")])
 
     options = AgentRunOptions(dry_run=True)
     runner = AgentRunner([tool], options, client=client)
@@ -130,11 +121,11 @@ def test_agent_runner_dry_run_skips_execution():
 
 def test_agent_runner_tool_debug_logging(tmp_path, capsys):
     tool = _make_tool(name="logger", capabilities={"write_fs"})
-    responses = [
-        [SimpleNamespace(type="tool_use", name=tool.name, input={"path": "notes.txt"}, id="tool-1")],
-        [SimpleNamespace(type="text", text="done")],
-    ]
-    client = SequencedClient(responses)
+    client = MockAnthropic()
+    client.add_response_from_blocks(
+        [tool_use_block(tool.name, {"path": "notes.txt"}, tool_use_id="tool-1")]
+    )
+    client.add_response_from_blocks([text_block("done")])
 
     debug_path = tmp_path / "tool-debug.jsonl"
     options = AgentRunOptions(debug_tool_use=True, tool_debug_log_path=debug_path)

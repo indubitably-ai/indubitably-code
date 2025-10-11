@@ -1,6 +1,7 @@
 """Headless agent runner with tool auditing and policy controls."""
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 import time
@@ -14,7 +15,8 @@ from agent import Tool
 from agents_md import load_agents_md
 from config import load_anthropic_config
 from prompt import PromptPacker, PackedPrompt
-from session import ContextSession, SessionSettings, load_session_settings
+from session import ContextSession, SessionSettings, TurnDiffTracker, load_session_settings
+from tools import ToolCall, ToolCallRuntime, ToolRouter, build_registry_from_tools
 
 
 @dataclass
@@ -37,6 +39,17 @@ class ToolEvent:
             "skipped": self.skipped,
             "paths": list(self.paths),
         }
+
+
+@dataclass
+class _PendingToolCall:
+    call: ToolCall
+    tool: Tool
+    tool_input: Dict[str, Any]
+    tool_use_id: str
+    tool_name: str
+    turn_idx: int
+    tracker: TurnDiffTracker
 
 
 @dataclass
@@ -83,6 +96,11 @@ class AgentRunner:
         self.edited_files: Set[str] = set()
         self.context: Optional[ContextSession] = None
         self._packer: Optional[PromptPacker] = None
+
+        self._configured_specs, self._tool_registry = build_registry_from_tools(self.active_tools)
+        self._tool_router = ToolRouter(self._tool_registry, self._configured_specs)
+        self._tool_runtime = ToolCallRuntime(self._tool_router)
+        self._tool_definitions = [spec.spec.to_anthropic_definition() for spec in self._configured_specs]
 
         if options.allowed_tools:
             missing = options.allowed_tools - set(self.tool_map)
@@ -132,9 +150,12 @@ class AgentRunner:
             context.add_assistant_message(assistant_blocks)
             should_rollback = False
 
+            turn_tracker = TurnDiffTracker(turn_id=turn_idx)
+
             tool_results_content: List[Dict[str, Any]] = []
             tool_error = False
             encountered_tool = False
+            pending_calls: List[_PendingToolCall] = []
 
             for block in assistant_blocks:
                 btype = block.get("type")
@@ -142,12 +163,69 @@ class AgentRunner:
                     text_outputs.append(block.get("text", ""))
                 elif btype == "tool_use":
                     encountered_tool = True
-                    event, tool_result = self._handle_tool_use(block, turn_idx)
-                    tool_results_content.append(tool_result)
-                    tool_error = tool_error or event.is_error
+                    block_dict = _normalize_block(block)
+                    tool_name = block_dict.get("name", "")
+                    tool_input = block_dict.get("input", {}) if isinstance(block_dict.get("input"), dict) else {}
+                    tool_use_id = block_dict.get("id") or block_dict.get("tool_use_id", f"tool-{turn_idx}")
+                    call = self._tool_router.build_tool_call(block_dict)
+                    tool = self.tool_map.get(tool_name)
 
-            if tool_results_content:
-                context.add_tool_results(tool_results_content, dedupe=False)
+                    if call is None:
+                        block_result, event = self._record_tool_event(
+                            turn_idx=turn_idx,
+                            tool_name=tool_name,
+                            tool_input=tool_input,
+                            tool_use_id=tool_use_id,
+                            result_str="unrecognized tool payload",
+                            is_error=True,
+                            skipped=False,
+                            tool=None,
+                        )
+                        tool_results_content.append(block_result)
+                        tool_error = tool_error or event.is_error
+                        continue
+
+                    if tool is None:
+                        block_result, event = self._record_tool_event(
+                            turn_idx=turn_idx,
+                            tool_name=tool_name,
+                            tool_input=tool_input,
+                            tool_use_id=tool_use_id,
+                            result_str=f"tool '{tool_name}' not permitted",
+                            is_error=True,
+                            skipped=False,
+                            tool=None,
+                        )
+                        tool_results_content.append(block_result)
+                        tool_error = tool_error or event.is_error
+                        continue
+
+                    if self.options.dry_run:
+                        block_result, event = self._record_tool_event(
+                            turn_idx=turn_idx,
+                            tool_name=tool_name,
+                            tool_input=tool_input,
+                            tool_use_id=tool_use_id,
+                            result_str="dry-run: execution skipped",
+                            is_error=True,
+                            skipped=True,
+                            tool=tool,
+                        )
+                        tool_results_content.append(block_result)
+                        tool_error = tool_error or event.is_error
+                        continue
+
+                    pending_calls.append(
+                        _PendingToolCall(
+                            call=call,
+                            tool=tool,
+                            tool_input=tool_input,
+                            tool_use_id=tool_use_id,
+                            turn_idx=turn_idx,
+                            tool_name=tool_name,
+                            tracker=turn_tracker,
+                        )
+                    )
 
             if not encountered_tool:
                 turns_used = turn_idx
@@ -157,6 +235,34 @@ class AgentRunner:
                 stopped_reason = "tool_error"
                 turns_used = turn_idx
                 break
+
+            if pending_calls:
+                runtime_blocks = self._execute_pending_calls(pending_calls)
+                for pending, runtime_result in zip(pending_calls, runtime_blocks):
+                    result_block, event = self._record_tool_event(
+                        turn_idx=pending.turn_idx,
+                        tool_name=pending.tool_name,
+                        tool_input=pending.tool_input,
+                        tool_use_id=pending.tool_use_id,
+                        result_str=str(runtime_result.get("content", "")),
+                        is_error=bool(runtime_result.get("is_error")),
+                        skipped=False,
+                        tool=pending.tool,
+                        prebuilt_block=runtime_result,
+                    )
+                    tool_results_content.append(result_block)
+                    tool_error = tool_error or event.is_error
+
+                pending_calls = []
+
+            if tool_results_content:
+                context.add_tool_results(tool_results_content, dedupe=False)
+
+            if tool_error and self.options.exit_on_tool_error:
+                stopped_reason = "tool_error"
+                turns_used = turn_idx
+                break
+
         else:
             turns_used = self.options.max_turns
             stopped_reason = "max_turns"
@@ -211,7 +317,7 @@ class AgentRunner:
                     "model": self.config.model,
                     "max_tokens": self.config.max_tokens,
                     "messages": prompt.messages,
-                    "tools": [tool.to_definition() for tool in self.active_tools],
+                    "tools": list(self._tool_definitions),
                 }
                 if prompt.system:
                     request["system"] = prompt.system
@@ -241,73 +347,6 @@ class AgentRunner:
                 continue
             result.append(tool)
         return result
-
-    def _handle_tool_use(self, block: Any, turn_idx: int) -> tuple[ToolEvent, Dict[str, Any]]:
-        if isinstance(block, dict):
-            tool_name = block.get("name", "")
-            tool_input = block.get("input", {})
-            tool_use_id = block.get("id") or block.get("tool_use_id", f"tool-{turn_idx}")
-        else:
-            tool_name = getattr(block, "name", "")
-            tool_input = getattr(block, "input", {})
-            tool_use_id = getattr(block, "id", f"tool-{turn_idx}")
-        tool = self.tool_map.get(tool_name)
-
-        skipped = False
-        is_error = False
-        result_str = ""
-
-        if tool is None:
-            is_error = True
-            result_str = f"tool '{tool_name}' not permitted"
-        elif self.options.dry_run:
-            skipped = True
-            is_error = True
-            result_str = "dry-run: execution skipped"
-        else:
-            try:
-                result_str = tool.fn(tool_input)
-            except Exception as exc:  # pragma: no cover - defensive
-                is_error = True
-                result_str = str(exc)
-
-        if tool is not None and not is_error and not skipped:
-            for path in _extract_paths(tool_input):
-                self.edited_files.add(path)
-                self._write_change_record(tool_name, path, result_str)
-        elif tool is not None and tool.capabilities and "write_fs" in tool.capabilities:
-            for path in _extract_paths(tool_input):
-                # Track attempted writes even if failing to aid auditing.
-                self.edited_files.add(path)
-
-        event = ToolEvent(
-            turn=turn_idx,
-            tool_name=tool_name,
-            raw_input=tool_input,
-            result=result_str,
-            is_error=is_error,
-            skipped=skipped,
-            paths=_extract_paths(tool_input),
-        )
-        self.tool_events.append(event)
-        self._write_audit_event(event)
-        self._handle_tool_debug(event)
-
-        if self.context is not None:
-            tool_result = self.context.build_tool_result_block(
-                tool_use_id,
-                result_str,
-                is_error=is_error,
-            )
-        else:  # pragma: no cover - defensive fallback
-            tool_result = {
-                "type": "tool_result",
-                "tool_use_id": tool_use_id,
-                "content": result_str,
-                "is_error": is_error,
-            }
-
-        return event, tool_result
 
     def _handle_tool_debug(self, event: ToolEvent) -> None:
         if not self.options.debug_tool_use:
@@ -345,6 +384,79 @@ class AgentRunner:
         }
         with self.options.changes_log_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def _execute_pending_calls(self, pending_calls: List[_PendingToolCall]) -> List[Dict[str, Any]]:
+        if not pending_calls:
+            return []
+
+        async def _runner() -> List[Dict[str, Any]]:
+            tasks = [
+                self._tool_runtime.execute_tool_call(
+                    session=self.context,
+                    turn_context=self.context,
+                    tracker=pending.tracker,
+                    sub_id=f"turn-{pending.turn_idx}",
+                    call=pending.call,
+                )
+                for pending in pending_calls
+            ]
+            return await asyncio.gather(*tasks)
+
+        return asyncio.run(_runner())
+
+    def _record_tool_event(
+        self,
+        *,
+        turn_idx: int,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        tool_use_id: str,
+        result_str: str,
+        is_error: bool,
+        skipped: bool,
+        tool: Optional[Tool],
+        prebuilt_block: Optional[Dict[str, Any]] = None,
+    ) -> tuple[Dict[str, Any], ToolEvent]:
+        paths = _extract_paths(tool_input)
+        event = ToolEvent(
+            turn=turn_idx,
+            tool_name=tool_name,
+            raw_input=tool_input,
+            result=result_str,
+            is_error=is_error,
+            skipped=skipped,
+            paths=paths,
+        )
+        self.tool_events.append(event)
+        self._write_audit_event(event)
+        self._handle_tool_debug(event)
+
+        if tool is not None:
+            if not is_error and not skipped:
+                for path in paths:
+                    self.edited_files.add(path)
+                    self._write_change_record(tool.name, path, result_str)
+            elif tool.capabilities and "write_fs" in tool.capabilities:
+                for path in paths:
+                    self.edited_files.add(path)
+
+        if prebuilt_block is not None:
+            block = dict(prebuilt_block)
+        elif self.context is not None:
+            block = self.context.build_tool_result_block(
+                tool_use_id,
+                result_str,
+                is_error=is_error,
+            )
+        else:
+            block = {
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": result_str,
+                "is_error": is_error,
+            }
+
+        return block, event
 
 
 def _jsonable(value: Any) -> Any:
