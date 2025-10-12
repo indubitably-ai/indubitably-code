@@ -3,14 +3,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
 
 from policies import ExecutionContext
+from tools.mcp_pool import MCPClientFactory, MCPClientPool
 
 from .compaction import CompactionEngine
 from .history import HistoryStore, MessageRecord
 from .pins import PinManager, Pin
-from .settings import SessionSettings
+from .settings import MCPServerDefinition, SessionSettings
 from .summaries import summarize_tool_output
 from .telemetry import SessionTelemetry
 from .token_meter import TokenMeter
@@ -33,6 +34,9 @@ class ContextSession:
         telemetry: Optional[SessionTelemetry] = None,
         history: Optional[HistoryStore] = None,
         pins: Optional[PinManager] = None,
+        mcp_client_factory: Optional[MCPClientFactory] = None,
+        mcp_client_ttl: Optional[float] = None,
+        mcp_definitions: Optional[Dict[str, MCPServerDefinition]] = None,
     ) -> None:
         self.settings = settings
         self.meter = meter or TokenMeter(settings.model.name)
@@ -44,10 +48,66 @@ class ContextSession:
         self.cwd = Path.cwd()
         self.exec_context = self._build_exec_context(settings)
         self.recent_summary: Optional[str] = None
+        self._mcp_pool: Optional[MCPClientPool] = None
+        self._mcp_definitions: Dict[str, MCPServerDefinition] = dict(mcp_definitions or {})
+        if mcp_client_factory is not None:
+            self.configure_mcp_pool(
+                mcp_client_factory,
+                ttl_seconds=mcp_client_ttl,
+                definitions=self._mcp_definitions,
+            )
 
     @classmethod
-    def from_settings(cls, settings: SessionSettings) -> "ContextSession":
-        return cls(settings)
+    def from_settings(
+        cls,
+        settings: SessionSettings,
+        *,
+        mcp_client_factory: Optional[MCPClientFactory] = None,
+        mcp_client_ttl: Optional[float] = None,
+        mcp_definitions: Optional[Dict[str, MCPServerDefinition]] = None,
+    ) -> "ContextSession":
+        return cls(
+            settings,
+            mcp_client_factory=mcp_client_factory,
+            mcp_client_ttl=mcp_client_ttl,
+            mcp_definitions=mcp_definitions,
+        )
+
+    def configure_mcp_pool(
+        self,
+        factory: MCPClientFactory,
+        *,
+        ttl_seconds: Optional[float] = None,
+        definitions: Optional[Dict[str, MCPServerDefinition]] = None,
+    ) -> None:
+        """Install an MCP client pool for this session."""
+
+        self._mcp_definitions = dict(definitions or {})
+        self._mcp_pool = MCPClientPool(factory, ttl_seconds=ttl_seconds)
+
+    async def get_mcp_client(self, server: str) -> Any:
+        """Return a pooled MCP client for *server* if pooling is configured."""
+
+        if self._mcp_pool is None:
+            return None
+        if self._mcp_definitions and server not in self._mcp_definitions:
+            return None
+        self.telemetry.incr("mcp_fetches")
+        return await self._mcp_pool.get_client(server)
+
+    async def mark_mcp_client_unhealthy(self, server: str) -> None:
+        """Evict the cached client for *server* after an error."""
+
+        if self._mcp_pool is None:
+            return
+        await self._mcp_pool.mark_unhealthy(server)
+
+    async def close(self) -> None:
+        """Release pooled resources associated with the session."""
+
+        if self._mcp_pool is not None:
+            await self._mcp_pool.shutdown()
+        self._mcp_pool = None
 
     def register_system_text(self, text: str) -> None:
         self.history.register_system(text, priority=0)

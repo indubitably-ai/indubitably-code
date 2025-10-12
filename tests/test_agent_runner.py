@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import asyncio
 
 import pytest
 
@@ -8,6 +9,7 @@ from agents_md import load_agents_md
 from agent_runner import AgentRunOptions, AgentRunner
 from tests.mocking import MockAnthropic, text_block, tool_use_block
 from errors import FatalToolError
+from session import MCPServerDefinition, MCPSettings, SessionSettings
 
 
 def _make_tool(name="writer", capabilities=None, fn=None):
@@ -263,3 +265,64 @@ def test_agent_runner_tool_debug_logging(tmp_path, capsys):
     assert payload["tool"] == tool.name
     assert payload["input"]["path"] == "notes.txt"
     assert payload["is_error"] is False
+
+
+
+class DummyMcpClient:
+    def __init__(self):
+        self.calls = 0
+
+    async def list_tools(self):
+        self.calls += 1
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            tools=[
+                SimpleNamespace(
+                    name="navigate",
+                    description="Navigate page",
+                    inputSchema={"type": "object", "properties": {}},
+                )
+            ]
+        )
+
+
+class DummyContext:
+    def __init__(self, client):
+        self._client = client
+        self.telemetry = type("T", (), {"incr": staticmethod(lambda *_: None)})()
+
+    async def get_mcp_client(self, name: str):
+        return self._client
+
+    async def mark_mcp_client_unhealthy(self, name: str):
+        self.marked = name
+
+
+def test_agent_runner_discovers_mcp_tools():
+    definition = MCPServerDefinition(
+        name="chrome-devtools",
+        command="npx",
+        args=("-y", "chrome-devtools-mcp@latest"),
+    )
+
+    async def factory(server: str):  # pragma: no cover - simple stub
+        return DummyMcpClient()
+
+    runner = AgentRunner(
+        tools=[],
+        options=AgentRunOptions(),
+        client=MockAnthropic(),
+        session_settings=SessionSettings(mcp=MCPSettings(enable=True, definitions=(definition,))),
+        mcp_client_factory=factory,
+    )
+
+    context = DummyContext(DummyMcpClient())
+
+    async def _run():
+        await runner._discover_mcp_tools(context)
+
+    asyncio.run(_run())
+
+    assert any(spec.spec.name == "chrome-devtools/navigate" for spec in runner._configured_specs)
+    assert "chrome-devtools/navigate" in runner._registered_mcp_tools

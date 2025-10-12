@@ -39,6 +39,9 @@ class MCPHandler(ToolHandler):
         try:
             result = await client.call_tool(payload.tool, payload.arguments)
         except Exception as exc:  # pragma: no cover - defensive
+            mark_unhealthy = getattr(invocation.session, "mark_mcp_client_unhealthy", None)
+            if mark_unhealthy is not None:
+                await mark_unhealthy(payload.server)
             return ToolOutput(content=f"MCP tool call failed: {exc}", success=False)
 
         content = _collect_mcp_content(result)

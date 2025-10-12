@@ -31,6 +31,9 @@ class ToolRouter:
                 return spec.supports_parallel
         return False
 
+    def register_spec(self, configured: ConfiguredToolSpec) -> None:
+        self._specs.append(configured)
+
     @staticmethod
     def build_tool_call(item: Dict[str, Any]) -> Optional[ToolCall]:
         item_type = item.get("type")

@@ -7,7 +7,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Sequence, Set
 
 from anthropic import Anthropic, RateLimitError
 
@@ -15,8 +15,17 @@ from agent import Tool
 from agents_md import load_agents_md
 from config import load_anthropic_config
 from prompt import PromptPacker, PackedPrompt
-from session import ContextSession, SessionSettings, TurnDiffTracker, load_session_settings
-from tools import ToolCall, ToolCallRuntime, ToolRouter, build_registry_from_tools
+from session import ContextSession, SessionSettings, TurnDiffTracker, load_session_settings, MCPServerDefinition
+from tools import (
+    ConfiguredToolSpec,
+    ToolCall,
+    ToolCallRuntime,
+    ToolRouter,
+    ToolSpec,
+    build_registry_from_tools,
+    MCPHandler,
+    connect_stdio_server,
+)
 
 
 @dataclass
@@ -46,7 +55,7 @@ class ToolEvent:
 @dataclass
 class _PendingToolCall:
     call: ToolCall
-    tool: Tool
+    tool: Optional[Tool]
     tool_input: Dict[str, Any]
     tool_use_id: str
     tool_name: str
@@ -87,11 +96,15 @@ class AgentRunner:
         *,
         client: Optional[Anthropic] = None,
         session_settings: Optional[SessionSettings] = None,
+        mcp_client_factory: Optional[Callable[[str], Awaitable[Any]]] = None,
+        mcp_client_ttl: Optional[float] = None,
     ) -> None:
         self.options = options
         self.config = load_anthropic_config()
         self.session_settings = session_settings or load_session_settings()
         self.client = client or Anthropic()
+        self._external_mcp_factory = mcp_client_factory
+        self._external_mcp_ttl = mcp_client_ttl
         self.all_tools = list(tools)
         self.active_tools = self._filter_tools()
         self.tool_map = {tool.name: tool for tool in self.active_tools}
@@ -107,8 +120,21 @@ class AgentRunner:
         self._tool_runtime = ToolCallRuntime(self._tool_router)
         self._tool_definitions = [spec.spec.to_anthropic_definition() for spec in self._configured_specs]
 
+        self._mcp_definitions: Dict[str, MCPServerDefinition] = {
+            definition.name: definition for definition in self.session_settings.mcp.definitions
+        }
+        self._mcp_enabled = bool(
+            self._external_mcp_factory or (
+                self.session_settings.mcp.enable and self._mcp_definitions
+            )
+        )
+        self._registered_mcp_tools: Set[str] = set()
+
         if options.allowed_tools:
-            missing = options.allowed_tools - set(self.tool_map)
+            known = set(self.tool_map)
+            if self._mcp_enabled:
+                known |= set(self._mcp_definitions)
+            missing = {tool for tool in options.allowed_tools if tool not in known}
             if missing and options.verbose:
                 print(f"Warning: allowed tools not available: {sorted(missing)}")
 
@@ -126,13 +152,22 @@ class AgentRunner:
         self.turn_summaries = []
         self._turn_trackers = []
 
-        context = ContextSession.from_settings(self.session_settings)
+        definitions = self._mcp_definitions if (self._mcp_enabled and self._mcp_definitions) else None
+        context = ContextSession.from_settings(
+            self.session_settings,
+            mcp_client_factory=self._build_mcp_client_factory() if self._mcp_enabled else None,
+            mcp_client_ttl=self._compute_mcp_ttl(),
+            mcp_definitions=definitions,
+        )
         agents_doc = load_agents_md()
         if agents_doc:
             context.register_system_text(agents_doc.system_text())
         packer = PromptPacker(context)
         self.context = context
         self._packer = packer
+
+        if self._mcp_enabled:
+            self._initialize_mcp_support(context)
 
         if initial_conversation:
             self._seed_context(context, initial_conversation)
@@ -200,13 +235,35 @@ class AgentRunner:
                             break
                         continue
 
-                    if tool is None:
+                    if not self._is_tool_allowed(tool_name):
                         block_result, event = self._record_tool_event(
                             turn_idx=turn_idx,
                             tool_name=tool_name,
                             tool_input=tool_input,
                             tool_use_id=tool_use_id,
                             result_str=f"tool '{tool_name}' not permitted",
+                            is_error=True,
+                            skipped=False,
+                            tool=None,
+                        )
+                        tool_results_content.append(block_result)
+                        tool_error = tool_error or event.is_error
+                        if event.metadata.get("error_type") == "fatal":
+                            fatal_event = event
+                            stopped_reason = "fatal_tool_error"
+                            turns_used = turn_idx
+                            break
+                        continue
+
+                    if tool is None and self._is_mcp_tool(tool_name):
+                        tool = None
+                    elif tool is None:
+                        block_result, event = self._record_tool_event(
+                            turn_idx=turn_idx,
+                            tool_name=tool_name,
+                            tool_input=tool_input,
+                            tool_use_id=tool_use_id,
+                            result_str=f"tool '{tool_name}' not available",
                             is_error=True,
                             skipped=False,
                             tool=None,
@@ -506,6 +563,114 @@ class AgentRunner:
             self.options.changes_log_path.parent.mkdir(parents=True, exist_ok=True)
             with self.options.changes_log_path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+    def _build_mcp_client_factory(self) -> Callable[[str], Awaitable[Any]]:
+        if self._external_mcp_factory is not None:
+            return self._external_mcp_factory
+
+        async def factory(server: str) -> Any:
+            definition = self._mcp_definitions.get(server)
+            if definition is None:
+                raise ValueError(f"unknown MCP server '{server}'")
+            return await connect_stdio_server(definition)
+
+        return factory
+
+    def _compute_mcp_ttl(self) -> Optional[float]:
+        if self._external_mcp_ttl is not None:
+            return self._external_mcp_ttl
+        if not self._mcp_enabled:
+            return None
+        durations = [d.ttl_seconds for d in self._mcp_definitions.values() if d.ttl_seconds is not None]
+        if not durations:
+            return None
+        return min(durations)
+
+    def _initialize_mcp_support(self, context: ContextSession) -> None:
+        async def loader() -> None:
+            await self._discover_mcp_tools(context)
+
+        try:
+            asyncio.run(loader())
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(loader())
+            finally:
+                loop.close()
+
+    async def _discover_mcp_tools(self, context: ContextSession) -> None:
+        if not self._mcp_enabled:
+            return
+
+        for server_name in self._mcp_definitions:
+            client = await context.get_mcp_client(server_name)
+            if client is None:
+                continue
+            try:
+                response = await client.list_tools()
+            except Exception:
+                await context.mark_mcp_client_unhealthy(server_name)
+                continue
+
+            for tool in getattr(response, "tools", []) or []:
+                fq_name = f"{server_name}/{tool.name}"
+                if fq_name in self._registered_mcp_tools:
+                    continue
+                schema = getattr(tool, "inputSchema", {}) or {}
+                spec = ToolSpec(
+                    name=fq_name,
+                    description=getattr(tool, "description", "") or "",
+                    input_schema=self._sanitize_mcp_schema(schema),
+                )
+                self._register_mcp_tool_spec(spec)
+
+    def _register_mcp_tool_spec(self, spec: ToolSpec) -> None:
+        if spec.name in self._registered_mcp_tools:
+            return
+
+        handler = MCPHandler()
+        self._tool_registry.register_handler(spec.name, handler)
+        configured = ConfiguredToolSpec(spec, supports_parallel=False)
+        self._configured_specs.append(configured)
+        self._tool_router.register_spec(configured)
+        self._tool_definitions.append(spec.to_anthropic_definition())
+        self._registered_mcp_tools.add(spec.name)
+
+    def _sanitize_mcp_schema(self, schema: Dict[str, Any]) -> Dict[str, Any]:
+        from tools.mcp_integration import MCPToolDiscovery
+
+        discovery = MCPToolDiscovery()
+        return discovery._sanitize_json_schema(dict(schema))  # type: ignore[attr-defined]
+
+    def _is_mcp_tool(self, name: str) -> bool:
+        if '/' not in name:
+            return False
+        server, _child = name.split('/', 1)
+        return server in self._mcp_definitions
+
+    def _is_tool_allowed(self, tool_name: str) -> bool:
+        if tool_name in self.options.blocked_tools:
+            return False
+        server_prefix = tool_name.split('/', 1)[0] if '/' in tool_name else None
+        if server_prefix and server_prefix in self.options.blocked_tools:
+            return False
+
+        if not self.options.allowed_tools:
+            return True
+        if tool_name in self.options.allowed_tools:
+            return True
+        if server_prefix and server_prefix in self.options.allowed_tools:
+            return True
+        return False
+
+
+    async def close(self) -> None:
+        """Release resources held by the runner."""
+
+        if self.context is not None:
+            await self.context.close()
 
     def _record_tool_event(
         self,

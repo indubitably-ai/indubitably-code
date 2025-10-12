@@ -2591,7 +2591,7 @@ pytest  # ✅ Pass
 - [ ] Implement ToolCallRuntime with locking
 - [ ] Add async support to agent.py
 - [ ] Mark parallelizable tools
-- [ ] Add parallel execution tests
+- [x] Add parallel execution tests
 - [ ] Measure performance improvements
 
 ### Priority 4: Output Management (Week 5)
@@ -2620,35 +2620,35 @@ pytest  # ✅ Pass
 
 ### Priority 7: Telemetry (Week 8)
 
-- [ ] Enhance telemetry collector
-- [ ] Add OTEL export format
-- [ ] Integrate telemetry into registry
-- [ ] Create telemetry dashboard
-- [ ] Add telemetry tests
+- [x] Enhance telemetry collector
+- [x] Add OTEL export format
+- [x] Integrate telemetry into registry
+- [x] Create telemetry dashboard
+- [x] Add telemetry tests
 
 ### Priority 8: Testing (Week 9)
 
-- [ ] Create tool test harness
-- [ ] Add tests for all tools
+- [x] Create tool test harness
+- [x] Add tests for all tools
 - [ ] Add parallel execution tests
-- [ ] Add integration tests
-- [ ] Achieve >80% test coverage
+- [x] Add integration tests
+- [x] Achieve >80% test coverage
 
 ### Priority 9: MCP Integration (Week 10)
 
-- [ ] Create MCP discovery module
-- [ ] Implement schema sanitization
-- [ ] Add MCP handler
-- [ ] Test with existing MCP servers
-- [ ] Document MCP tool registration
+- [x] Create MCP discovery module
+- [x] Implement schema sanitization
+- [x] Add MCP handler
+- [x] Test with existing MCP servers
+- [x] Document MCP tool registration
 
 ### Priority 10: Policies & Documentation (Week 11-12)
 
-- [ ] Implement execution policies
-- [ ] Add policy configuration
-- [ ] Update documentation
-- [ ] Create migration guide for users
-- [ ] Final testing and polish
+- [x] Implement execution policies
+- [x] Add policy configuration
+- [x] Update documentation
+- [x] Create migration guide for users
+- [x] Final testing and polish
 
 ---
 

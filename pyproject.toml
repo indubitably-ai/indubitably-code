@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "anthropic>=0.67.0",
+    "mcp>=1.17.0",
     "pillow>=11.3.0",
     "playwright>=1.55.0",
     "pyfiglet>=1.0.2",

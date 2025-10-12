@@ -174,6 +174,43 @@ language; the agent translates your request into the schema below.
 
 ---
 
+## Execution Policies & Approval Workflow
+The agent now enforces sandboxing and approval gates for shell access. Policy defaults live in
+session settings (`SessionSettings.execution`) and can be overridden via your session TOML (or the
+`INDUBITABLY_SESSION_CONFIG` path). Key knobs:
+
+- `sandbox`: `none`, `restricted`, or `strict` limits which commands may run.
+- `approval`: `never`, `on_request`, `on_write`, or `always` defines when user consent is required.
+- `allowed_paths` / `blocked_commands`: fine-grained write/command allow/deny lists.
+- `timeout_seconds`: caps foreground shell invocations even if the request omits a timeout.
+
+See [`docs/migration-guide.md`](docs/migration-guide.md) for the full matrix, sample configs, and how
+policy decisions flow through the new `ShellHandler`.
+
+
+## MCP Client Pooling
+Define MCP servers in your session TOML (see `session/settings.py`) and the harness will spawn them with
+`connect_stdio_server`, pool the sessions, and auto-discover the exposed tools. For example:
+
+```toml
+[mcp]
+  enable = true
+  [[mcp.definitions]]
+  name = "chrome-devtools"
+  command = "npx"
+  args = ["-y", "chrome-devtools-mcp@latest"]
+  ttl_seconds = 300
+```
+
+`ContextSession` keeps pooled clients alive across tool calls, marks them unhealthy after failures, and
+lets you fetch one via `await context.get_mcp_client("chrome-devtools")`.
+
+
+## Telemetry Export
+`SessionTelemetry` can stream tool events to an OTLP-compatible sink via the lightweight
+`OtelExporter`. Configure a file path or stream (or supply a real OTLP collector) and call
+`telemetry.flush_to_otel(exporter)` after each turn to ship structured events.
+
 ## Asking for AWS Data in Plain Language
 The `aws_api_mcp` tool is automatically available to the agent, so you can stay conversational and
 let the model translate your intent into the structured AWS CLI call.

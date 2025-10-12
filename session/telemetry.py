@@ -3,8 +3,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional, TYPE_CHECKING
 import json
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .otel import OtelExporter
 
 
 @dataclass
@@ -106,27 +109,34 @@ class SessionTelemetry:
             "success_rate": (calls - errors) / calls,
         }
 
-    def export_otel(self) -> str:
-        records = []
+    def iter_otel_events(self) -> Iterable[Dict[str, object]]:
+        """Yield OTEL-style event dictionaries for downstream exporters."""
+
         for event in self.tool_executions:
-            records.append(
-                {
-                    "timestamp": event.timestamp.isoformat(),
-                    "name": f"tool.{event.tool_name}",
-                    "attributes": {
-                        "tool.name": event.tool_name,
-                        "tool.call_id": event.call_id,
-                        "tool.turn": event.turn,
-                        "tool.duration_ms": event.duration * 1000,
-                        "tool.success": event.success,
-                        "tool.error": event.error,
-                        "tool.input_bytes": event.input_size,
-                        "tool.output_bytes": event.output_size,
-                        "tool.truncated": event.truncated,
-                    },
-                }
-            )
+            yield {
+                "timestamp": event.timestamp.isoformat(),
+                "name": f"tool.{event.tool_name}",
+                "attributes": {
+                    "tool.name": event.tool_name,
+                    "tool.call_id": event.call_id,
+                    "tool.turn": event.turn,
+                    "tool.duration_ms": event.duration * 1000,
+                    "tool.success": event.success,
+                    "tool.error": event.error,
+                    "tool.input_bytes": event.input_size,
+                    "tool.output_bytes": event.output_size,
+                    "tool.truncated": event.truncated,
+                },
+            }
+
+    def export_otel(self) -> str:
+        records = list(self.iter_otel_events())
         return json.dumps({"events": records}, ensure_ascii=False, indent=2)
+
+    def flush_to_otel(self, exporter: "OtelExporter") -> None:
+        """Send recorded tool executions to the provided OTEL exporter."""
+
+        exporter.export(self.iter_otel_events())
 
 
 __all__ = ["SessionTelemetry", "ToolExecutionEvent"]

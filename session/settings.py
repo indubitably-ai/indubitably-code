@@ -6,7 +6,7 @@ import tomllib
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, Iterable, Mapping, MutableMapping, Optional
+from typing import Any, Dict, Iterable, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 from policies import ApprovalPolicy, SandboxPolicy
 
@@ -45,10 +45,26 @@ class ToolLimitSettings:
     max_lines: int = 800
 
 
+@dataclass
+class MCPServerDefinition:
+    """Configuration for launching and pooling an MCP server."""
+
+    name: str
+    command: str
+    args: tuple[str, ...] = ()
+    env: tuple[tuple[str, str], ...] = ()
+    cwd: Optional[Path] = None
+    encoding: str = "utf-8"
+    encoding_errors: str = "strict"
+    startup_timeout_ms: Optional[int] = None
+    ttl_seconds: Optional[float] = None
+
+
 @dataclass(frozen=True)
 class MCPSettings:
     enable: bool = True
     servers: tuple[str, ...] = ("mcp://local",)
+    definitions: tuple[MCPServerDefinition, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -196,11 +212,21 @@ def _settings_from_mapping(mapping: Mapping[str, Any], *, base_dir: Optional[Pat
             servers = tuple(part.strip() for part in servers_value.split(",") if part.strip())
         else:
             servers = mcp.servers
+
+        definitions_value = _coerce_sequence(mcp_section.get("definitions"))
+        definitions: list[MCPServerDefinition] = []
+        if definitions_value:
+            for idx, item in enumerate(definitions_value):
+                if not isinstance(item, Mapping):
+                    raise ValueError("mcp.definitions entries must be tables")
+                definitions.append(_parse_mcp_definition(item, base_dir))
+
         mcp = _replace_dataclass(
             mcp,
             {
                 "enable": bool(mcp_section.get("enable", mcp.enable)),
                 "servers": tuple(servers) or mcp.servers,
+                "definitions": tuple(definitions) or mcp.definitions,
             },
         )
 
@@ -248,6 +274,101 @@ def _settings_from_mapping(mapping: Mapping[str, Any], *, base_dir: Optional[Pat
         privacy=privacy,
         execution=execution,
     )
+
+
+def _coerce_sequence(value: Any) -> Optional[Sequence[Any]]:
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        return value
+    if isinstance(value, str):
+        return [value]
+    return None
+
+
+def _parse_mcp_definition(entry: Mapping[str, Any], base_dir: Optional[Path]) -> MCPServerDefinition:
+    name_raw = entry.get("name")
+    if name_raw is None:
+        raise ValueError("mcp definition missing required 'name'")
+    name = str(name_raw).strip()
+    if not name:
+        raise ValueError("mcp definition 'name' must contain text")
+
+    command_raw = entry.get("command")
+    if not command_raw:
+        raise ValueError(f"mcp definition '{name}' missing required 'command'")
+    command = str(command_raw)
+
+    args_value = entry.get("args", ())
+    if isinstance(args_value, (list, tuple)):
+        args = tuple(str(item) for item in args_value)
+    elif isinstance(args_value, str):
+        args = tuple(part for part in (segment.strip() for segment in args_value.split() if segment.strip()))
+    else:
+        raise ValueError(f"mcp definition '{name}' args must be a list or string")
+
+    env = _coerce_env(entry.get("env"))
+
+    cwd_value = entry.get("cwd")
+    cwd_path: Optional[Path]
+    if cwd_value is not None:
+        cwd_path = Path(str(cwd_value)).expanduser()
+        if not cwd_path.is_absolute() and base_dir is not None:
+            cwd_path = (base_dir / cwd_path).resolve()
+        else:
+            cwd_path = cwd_path.resolve()
+    else:
+        cwd_path = None
+
+    encoding = str(entry.get("encoding", "utf-8"))
+    encoding_errors = str(entry.get("encoding_errors", "strict"))
+
+    startup_timeout_ms = entry.get("startup_timeout_ms")
+    if startup_timeout_ms is not None:
+        startup_timeout_ms = int(startup_timeout_ms)
+
+    ttl_value = entry.get("ttl_seconds")
+    ttl_seconds: Optional[float]
+    if ttl_value is None:
+        ttl_seconds = None
+    else:
+        ttl_seconds = float(ttl_value)
+        if ttl_seconds <= 0:
+            raise ValueError(f"mcp definition '{name}' ttl_seconds must be positive")
+
+    return MCPServerDefinition(
+        name=name,
+        command=command,
+        args=args,
+        env=env,
+        cwd=cwd_path,
+        encoding=encoding,
+        encoding_errors=encoding_errors,
+        startup_timeout_ms=startup_timeout_ms,
+        ttl_seconds=ttl_seconds,
+    )
+
+
+def _coerce_env(value: Any) -> tuple[tuple[str, str], ...]:
+    if value is None:
+        return ()
+    if isinstance(value, Mapping):
+        return tuple((str(k), str(v)) for k, v in value.items())
+    if isinstance(value, (list, tuple)):
+        pairs: list[tuple[str, str]] = []
+        for item in value:
+            if isinstance(item, Mapping):
+                for key, val in item.items():
+                    pairs.append((str(key), str(val)))
+            elif isinstance(item, str):
+                if "=" not in item:
+                    raise ValueError("env entries provided as strings must be KEY=VALUE")
+                key, _, val = item.partition("=")
+                pairs.append((key.strip(), val.strip()))
+            else:
+                raise ValueError("env entries must be mappings or KEY=VALUE strings")
+        return tuple(pairs)
+    raise ValueError("env must be a mapping or sequence of KEY=VALUE strings")
 
 def _parse_enum(enum_cls: type[Enum], raw: Any, default: Enum) -> Enum:
     if raw is None:
@@ -360,6 +481,7 @@ __all__ = [
     "CompactionSettings",
     "ToolLimitSettings",
     "MCPSettings",
+    "MCPServerDefinition",
     "PrivacySettings",
     "ExecutionPolicySettings",
     "load_session_settings",

@@ -26,6 +26,9 @@ class ToolRegistry:
     def get_handler(self, name: str) -> Optional[ToolHandler]:
         return self._handlers.get(name)
 
+    def register_handler(self, name: str, handler: ToolHandler) -> None:
+        self._handlers[name] = handler
+
     async def dispatch(self, invocation: ToolInvocation) -> ToolOutput:
         handler = self.get_handler(invocation.tool_name)
         if handler is None:
