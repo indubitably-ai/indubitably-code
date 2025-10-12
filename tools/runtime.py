@@ -44,12 +44,15 @@ class ToolRuntime:
             payload=payload,
         )
         output = await self._registry.dispatch(invocation)
+        metadata = dict(output.metadata or {})
         return ToolRuntimeResult(
             output={
                 "type": "tool_result",
                 "tool_use_id": call_id,
                 "content": output.content,
                 "is_error": not output.success,
+                "metadata": metadata,
+                "error_type": metadata.get("error_type"),
             },
             success=output.success,
         )

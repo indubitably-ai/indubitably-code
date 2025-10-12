@@ -30,6 +30,8 @@ class TurnDiffTracker:
     edits: List[FileEdit] = field(default_factory=list)
     _edited_paths: Set[Path] = field(default_factory=set, init=False, repr=False)
     _locked_paths: Set[Path] = field(default_factory=set, init=False, repr=False)
+    conflicts: List[str] = field(default_factory=list)
+    _undone: bool = field(default=False, init=False, repr=False)
 
     def record_edit(
         self,
@@ -43,6 +45,22 @@ class TurnDiffTracker:
     ) -> None:
         """Record an edit made by a tool."""
         resolved = Path(path).resolve()
+        previous_edits = self.get_edits_for_path(resolved)
+        if previous_edits:
+            last_with_content = next(
+                (ed for ed in reversed(previous_edits) if ed.new_content is not None),
+                None,
+            )
+            if (
+                last_with_content is not None
+                and last_with_content.new_content is not None
+                and old_content is not None
+                and last_with_content.new_content != old_content
+            ):
+                self.conflicts.append(
+                    f"{resolved}: prior new content diverges from current old content (tool={tool_name})"
+                )
+
         edit = FileEdit(
             path=resolved,
             tool_name=tool_name,
@@ -114,6 +132,76 @@ class TurnDiffTracker:
             diffs.append("".join(diff))
 
         return "\n".join(diff for diff in diffs if diff) or None
+
+    def generate_conflict_report(self) -> Optional[str]:
+        if not self.conflicts:
+            return None
+        lines = [f"Turn {self.turn_id} conflict warnings:"]
+        lines.extend(f"  - {msg}" for msg in self.conflicts)
+        return "\n".join(lines)
+
+    def undo(self) -> List[str]:
+        if self._undone:
+            return []
+
+        operations: List[str] = []
+
+        for edit in reversed(self.edits):
+            path = edit.path
+            action = (edit.action or "").lower()
+
+            if action in {"create", "add"} and edit.old_content is None:
+                if path.exists():
+                    path.unlink()
+                    operations.append(f"removed {path}")
+                continue
+
+            if action == "delete":
+                if edit.old_content is not None:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(edit.old_content, encoding="utf-8")
+                    operations.append(f"restored {path}")
+                continue
+
+            if action == "rename":
+                dest_str = edit.new_content or ""
+                if not dest_str:
+                    continue
+                candidates = []
+                dest_candidate = Path(dest_str)
+                candidates.append(dest_candidate)
+                if not dest_candidate.is_absolute():
+                    candidates.append((path.parent / dest_candidate).resolve())
+                try:
+                    candidates.append(dest_candidate.resolve())
+                except FileNotFoundError:
+                    pass
+                moved = False
+                for candidate in candidates:
+                    try:
+                        candidate_path = Path(candidate)
+                        if candidate_path.exists():
+                            candidate_path.rename(path)
+                            operations.append(f"renamed {candidate_path} -> {path}")
+                            moved = True
+                            break
+                    except Exception:
+                        continue
+                if not moved:
+                    operations.append(f"rename undo failed for {path}")
+                continue
+
+            if edit.old_content is not None:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(edit.old_content, encoding="utf-8")
+                operations.append(f"reverted {path}")
+            else:
+                if path.exists():
+                    path.unlink()
+                    operations.append(f"removed {path}")
+
+        self._undone = True
+        return operations
 
 
 __all__ = ["FileEdit", "TurnDiffTracker"]

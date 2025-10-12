@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, TYPE_CHECKING
 from ..handler import ToolHandler, ToolInvocation, ToolKind, ToolOutput
 from ..schemas import validate_tool_input
 from ..payload import FunctionToolPayload, ToolPayload
+from errors import ToolError
 
 if TYPE_CHECKING:  # pragma: no cover
     from agent import Tool
@@ -51,6 +52,8 @@ class FunctionToolHandler(ToolHandler):
             except RuntimeError:
                 # No running loop (e.g., synchronous context)
                 result = _call()
+        except ToolError:
+            raise
         except Exception as exc:  # pragma: no cover - surfaced in ToolOutput
             return ToolOutput(content=str(exc), success=False, metadata={"exception": repr(exc)})
 

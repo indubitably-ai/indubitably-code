@@ -3,12 +3,33 @@ from pathlib import Path
 
 import pytest
 
+from agent import Tool
+from tools.handlers.function import FunctionToolHandler
 from tools_edit import edit_file_impl
 from session.turn_diff_tracker import TurnDiffTracker
+from tests.tool_harness import MockToolContext, ToolTestHarness
+
+
+def _make_tool() -> Tool:
+    return Tool(
+        name="edit_file",
+        description="",
+        input_schema={"type": "object"},
+        fn=edit_file_impl,
+    )
+
+
+def _harness(tmp_path: Path) -> tuple[ToolTestHarness, Path]:
+    base = tmp_path / "repo"
+    base.mkdir()
+    context = MockToolContext.create(cwd=base)
+    handler = FunctionToolHandler(_make_tool())
+    return ToolTestHarness(handler, context=context), base
 
 
 def test_edit_file_replaces_occurrence(tmp_path: Path):
-    path = tmp_path / "file.txt"
+    harness, base = _harness(tmp_path)
+    path = base / "file.txt"
     path.write_text("hello world", encoding="utf-8")
     result = json.loads(
         edit_file_impl({
@@ -22,7 +43,8 @@ def test_edit_file_replaces_occurrence(tmp_path: Path):
 
 
 def test_edit_file_dry_run_reports(tmp_path: Path):
-    path = tmp_path / "file.txt"
+    harness, base = _harness(tmp_path)
+    path = base / "file.txt"
     path.write_text("foo foo", encoding="utf-8")
     result = json.loads(
         edit_file_impl({
@@ -38,7 +60,8 @@ def test_edit_file_dry_run_reports(tmp_path: Path):
 
 
 def test_edit_file_missing_old_raises(tmp_path: Path):
-    path = tmp_path / "file.txt"
+    harness, base = _harness(tmp_path)
+    path = base / "file.txt"
     path.write_text("hello", encoding="utf-8")
     with pytest.raises(ValueError):
         edit_file_impl({
@@ -49,7 +72,8 @@ def test_edit_file_missing_old_raises(tmp_path: Path):
 
 
 def test_edit_file_create_new(tmp_path: Path):
-    path = tmp_path / "new.txt"
+    harness, base = _harness(tmp_path)
+    path = base / "new.txt"
     result = json.loads(
         edit_file_impl({
             "path": str(path),

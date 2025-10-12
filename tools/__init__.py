@@ -1,7 +1,7 @@
 """Tool system abstractions for the indubitably agent."""
 
 from .handler import ToolHandler, ToolInvocation, ToolKind, ToolOutput
-from .handlers import FunctionToolHandler
+from .handlers import FunctionToolHandler, MCPHandler
 from .legacy import build_registry_from_tools, tool_specs_from_tools
 from .payload import (
     FunctionToolPayload,
@@ -29,6 +29,8 @@ from .schemas import (
     validate_tool_input,
 )
 from .spec import ToolSpec
+from .mcp_integration import MCPToolDiscovery, MCPServerConfig
+from errors import ErrorType, ToolError, FatalToolError, ValidationError, SandboxToolError
 
 __all__ = [
     "ConfiguredToolSpec",
@@ -36,6 +38,7 @@ __all__ = [
     "MCPToolPayload",
     "ToolCall",
     "FunctionToolHandler",
+    "MCPHandler",
     "build_registry_from_tools",
     "tool_specs_from_tools",
     "ToolHandler",
@@ -64,4 +67,11 @@ __all__ = [
     "TodoItemInput",
     "TodoWriteInput",
     "validate_tool_input",
+    "ToolError",
+    "FatalToolError",
+    "ValidationError",
+    "SandboxToolError",
+    "ErrorType",
+    "MCPToolDiscovery",
+    "MCPServerConfig",
 ]

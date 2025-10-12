@@ -28,6 +28,7 @@ class ToolEvent:
     is_error: bool
     skipped: bool
     paths: List[str] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -38,6 +39,7 @@ class ToolEvent:
             "is_error": self.is_error,
             "skipped": self.skipped,
             "paths": list(self.paths),
+            "metadata": dict(self.metadata),
         }
 
 
@@ -74,6 +76,7 @@ class AgentRunResult:
     turns_used: int
     stopped_reason: str
     conversation: List[Dict[str, Any]]
+    turn_summaries: List[Dict[str, Any]]
 
 
 class AgentRunner:
@@ -96,6 +99,8 @@ class AgentRunner:
         self.edited_files: Set[str] = set()
         self.context: Optional[ContextSession] = None
         self._packer: Optional[PromptPacker] = None
+        self.turn_summaries: List[Dict[str, Any]] = []
+        self._turn_trackers: List[TurnDiffTracker] = []
 
         self._configured_specs, self._tool_registry = build_registry_from_tools(self.active_tools)
         self._tool_router = ToolRouter(self._tool_registry, self._configured_specs)
@@ -118,6 +123,8 @@ class AgentRunner:
 
         self.tool_events = []
         self.edited_files = set()
+        self.turn_summaries = []
+        self._turn_trackers = []
 
         context = ContextSession.from_settings(self.session_settings)
         agents_doc = load_agents_md()
@@ -136,6 +143,7 @@ class AgentRunner:
         stopped_reason = "completed"
         turns_used = 0
         should_rollback = True
+        fatal_event: Optional[ToolEvent] = None
 
         for turn_idx in range(1, self.options.max_turns + 1):
             packed = packer.pack()
@@ -149,6 +157,8 @@ class AgentRunner:
             assistant_blocks = _normalize_content(response.content)
             context.add_assistant_message(assistant_blocks)
             should_rollback = False
+
+            setattr(context, "turn_index", turn_idx)
 
             turn_tracker = TurnDiffTracker(turn_id=turn_idx)
 
@@ -183,6 +193,11 @@ class AgentRunner:
                         )
                         tool_results_content.append(block_result)
                         tool_error = tool_error or event.is_error
+                        if event.metadata.get("error_type") == "fatal":
+                            fatal_event = event
+                            stopped_reason = "fatal_tool_error"
+                            turns_used = turn_idx
+                            break
                         continue
 
                     if tool is None:
@@ -198,6 +213,11 @@ class AgentRunner:
                         )
                         tool_results_content.append(block_result)
                         tool_error = tool_error or event.is_error
+                        if event.metadata.get("error_type") == "fatal":
+                            fatal_event = event
+                            stopped_reason = "fatal_tool_error"
+                            turns_used = turn_idx
+                            break
                         continue
 
                     if self.options.dry_run:
@@ -213,6 +233,11 @@ class AgentRunner:
                         )
                         tool_results_content.append(block_result)
                         tool_error = tool_error or event.is_error
+                        if event.metadata.get("error_type") == "fatal":
+                            fatal_event = event
+                            stopped_reason = "fatal_tool_error"
+                            turns_used = turn_idx
+                            break
                         continue
 
                     pending_calls.append(
@@ -227,16 +252,16 @@ class AgentRunner:
                         )
                     )
 
-            if not encountered_tool:
+            if not encountered_tool and not fatal_event:
                 turns_used = turn_idx
                 break
 
-            if tool_error and self.options.exit_on_tool_error:
+            if tool_error and self.options.exit_on_tool_error and not fatal_event:
                 stopped_reason = "tool_error"
                 turns_used = turn_idx
                 break
 
-            if pending_calls:
+            if pending_calls and not fatal_event:
                 runtime_blocks = self._execute_pending_calls(pending_calls)
                 for pending, runtime_result in zip(pending_calls, runtime_blocks):
                     result_block, event = self._record_tool_event(
@@ -252,13 +277,24 @@ class AgentRunner:
                     )
                     tool_results_content.append(result_block)
                     tool_error = tool_error or event.is_error
+                    if event.metadata.get("error_type") == "fatal":
+                        fatal_event = event
+                        stopped_reason = "fatal_tool_error"
+                        turns_used = pending.turn_idx
+                        break
 
                 pending_calls = []
 
             if tool_results_content:
                 context.add_tool_results(tool_results_content, dedupe=False)
 
-            if tool_error and self.options.exit_on_tool_error:
+            self._log_turn_diff(turn_idx, turn_tracker)
+            self._turn_trackers.append(turn_tracker)
+
+            if fatal_event:
+                break
+
+            if tool_error and self.options.exit_on_tool_error and not fatal_event:
                 stopped_reason = "tool_error"
                 turns_used = turn_idx
                 break
@@ -266,6 +302,9 @@ class AgentRunner:
         else:
             turns_used = self.options.max_turns
             stopped_reason = "max_turns"
+
+        if fatal_event and stopped_reason != "fatal_tool_error":
+            stopped_reason = "fatal_tool_error"
 
         final_response = "\n".join(txt for txt in text_outputs if txt).strip()
         conversation_payload = context.build_messages()
@@ -277,7 +316,33 @@ class AgentRunner:
             turns_used=turns_used,
             stopped_reason=stopped_reason,
             conversation=conversation_payload,
+            turn_summaries=self.turn_summaries,
         )
+
+    def undo_last_turn(self) -> List[str]:
+        if not self._turn_trackers:
+            return []
+
+        tracker = self._turn_trackers.pop()
+        operations = tracker.undo()
+        if not operations:
+            return operations
+
+        if self.turn_summaries:
+            self.turn_summaries.pop()
+
+        if self.options.changes_log_path:
+            entry = {
+                "turn": tracker.turn_id,
+                "undo": True,
+                "operations": operations,
+            }
+            entry["paths"] = sorted({str(edit.path) for edit in tracker.edits})
+            self.options.changes_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.options.changes_log_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+        return operations
 
 
     def _seed_context(self, context: ContextSession, conversation: List[Dict[str, Any]]) -> None:
@@ -404,6 +469,44 @@ class AgentRunner:
 
         return asyncio.run(_runner())
 
+    def _log_turn_diff(self, turn_idx: int, tracker: TurnDiffTracker) -> None:
+        if not tracker.edits:
+            return
+
+        paths: Set[str] = set()
+        cwd = Path.cwd()
+        for edit in tracker.edits:
+            resolved = edit.path
+            try:
+                relative = resolved.resolve().relative_to(cwd)
+                paths.add(str(relative))
+            except ValueError:
+                paths.add(str(resolved.resolve()))
+
+        self.edited_files.update(paths)
+
+        entry = {
+            "turn": turn_idx,
+            "summary": tracker.generate_summary(),
+            "paths": sorted(paths),
+        }
+
+        conflict_report = tracker.generate_conflict_report()
+        if conflict_report:
+            entry["conflicts"] = list(tracker.conflicts)
+            entry["conflict_report"] = conflict_report
+
+        diff = tracker.generate_unified_diff()
+        if diff:
+            entry["diff"] = diff
+
+        self.turn_summaries.append(entry)
+
+        if self.options.changes_log_path:
+            self.options.changes_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.options.changes_log_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
     def _record_tool_event(
         self,
         *,
@@ -418,6 +521,10 @@ class AgentRunner:
         prebuilt_block: Optional[Dict[str, Any]] = None,
     ) -> tuple[Dict[str, Any], ToolEvent]:
         paths = _extract_paths(tool_input)
+        metadata = {}
+        if prebuilt_block is not None:
+            metadata = dict(prebuilt_block.get("metadata", {}))
+
         event = ToolEvent(
             turn=turn_idx,
             tool_name=tool_name,
@@ -426,6 +533,7 @@ class AgentRunner:
             is_error=is_error,
             skipped=skipped,
             paths=paths,
+            metadata=metadata,
         )
         self.tool_events.append(event)
         self._write_audit_event(event)
@@ -455,6 +563,10 @@ class AgentRunner:
                 "content": result_str,
                 "is_error": is_error,
             }
+
+        if metadata:
+            block.setdefault("metadata", metadata)
+            block.setdefault("error_type", metadata.get("error_type"))
 
         return block, event
 

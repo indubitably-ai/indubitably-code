@@ -109,12 +109,16 @@ def rename_file_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] =
     try:
         os.replace(source, dest)
         if tracker is not None:
+            try:
+                dest_resolved = dest.resolve()
+            except FileNotFoundError:
+                dest_resolved = dest
             tracker.record_edit(
                 path=source,
                 tool_name="rename_file",
                 action="rename",
-                old_content=source_value,
-                new_content=dest_value,
+                old_content=str(source.resolve()),
+                new_content=str(dest_resolved),
             )
     finally:
         if tracker is not None:

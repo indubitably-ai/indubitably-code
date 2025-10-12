@@ -286,6 +286,7 @@ def run_agent(
             assistant_blocks = _normalize_content(msg.content)
             context.add_assistant_message(assistant_blocks)
             turn_index += 1
+            setattr(context, "turn_index", turn_index)
 
             turn_tracker = TurnDiffTracker(turn_id=turn_index)
 
@@ -295,6 +296,7 @@ def run_agent(
             tool_results_content: List[Dict[str, Any]] = []
             pending_calls: List[tuple] = []
 
+            fatal_event = False
             for block_dict in assistant_blocks:
                 if not interrupted and listener.consume_triggered():
                     interrupted = True
@@ -435,6 +437,10 @@ def run_agent(
                         result_str,
                         is_error=is_error,
                     )
+                    metadata = result.get("metadata")
+                    if metadata:
+                        tool_block["metadata"] = metadata
+                        tool_block["error_type"] = metadata.get("error_type")
                     context.add_tool_results([tool_block], dedupe=False)
 
                     _record_tool_debug_event(
@@ -449,7 +455,14 @@ def run_agent(
                     )
                     tool_event_counter += 1
 
+                    if result.get("error_type") == "fatal" or (metadata and metadata.get("error_type") == "fatal"):
+                        fatal_event = True
+
                 pending_calls = []
+
+            if fatal_event:
+                print("Fatal tool error encountered; stopping session.", file=sys.stderr)
+                break
 
             if interrupted and not interrupt_notified:
                 _notify_manual_interrupt(YELLOW, RESET, transcript_path, use_color)

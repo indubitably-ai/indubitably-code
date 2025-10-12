@@ -1,57 +1,91 @@
+import asyncio
 import json
 from pathlib import Path
+from typing import Tuple
 
 import pytest
 
+from agent import Tool
+from tools.handlers.function import FunctionToolHandler
 from tools_apply_patch import apply_patch_impl
 from session.turn_diff_tracker import TurnDiffTracker
+from tests.tool_harness import MockToolContext, ToolTestHarness
+
+
+def _make_tool() -> Tool:
+    return Tool(
+        name="apply_patch",
+        description="",
+        input_schema={"type": "object"},
+        fn=apply_patch_impl,
+    )
+
+
+def _harness(tmp_path: Path) -> Tuple[ToolTestHarness, Path]:
+    base = tmp_path / "repo"
+    base.mkdir()
+    context = MockToolContext.create(cwd=base)
+    handler = FunctionToolHandler(_make_tool())
+    return ToolTestHarness(handler, context=context), base
+
+
+def _invoke(harness: ToolTestHarness, payload: dict[str, object]) -> dict[str, object]:
+    result = asyncio.run(harness.invoke("apply_patch", payload))
+    return json.loads(result.content)
 
 
 def test_apply_patch_add(tmp_path: Path):
+    harness, base = _harness(tmp_path)
     patch = """*** Add File: sample.txt
 @@ -0,0 +1,2 @@
 +hello
 +world
 """
-    result = json.loads(
-        apply_patch_impl({"file_path": str(tmp_path / "sample.txt"), "patch": patch})
+    result = _invoke(
+        harness,
+        {"file_path": str(base / "sample.txt"), "patch": patch},
     )
     assert result["ok"] is True
-    assert (tmp_path / "sample.txt").read_text(encoding="utf-8") == "hello\nworld\n"
+    assert (base / "sample.txt").read_text(encoding="utf-8") == "hello\nworld\n"
 
 
 def test_apply_patch_dry_run_update(tmp_path: Path):
-    path = tmp_path / "sample.txt"
+    harness, base = _harness(tmp_path)
+    path = base / "sample.txt"
     path.write_text("hello\n", encoding="utf-8")
     patch = """*** Update File: sample.txt
 @@ -1,1 +1,1 @@
 -hello
 +goodbye
 """
-    result = json.loads(
-        apply_patch_impl({
+    result = _invoke(
+        harness,
+        {
             "file_path": str(path),
             "patch": patch,
             "dry_run": True,
-        })
+        },
     )
     assert result["dry_run"] is True
     assert path.read_text(encoding="utf-8") == "hello\n"
 
 
 def test_apply_patch_header_mismatch(tmp_path: Path):
-    path = tmp_path / "sample.txt"
+    harness, base = _harness(tmp_path)
+    path = base / "sample.txt"
     path.write_text("hello\n", encoding="utf-8")
     patch = """*** Update File: other.txt
 @@ -1,1 +1,1 @@
 -hello
 +hi
 """
-    result = json.loads(
-        apply_patch_impl({"file_path": str(path), "patch": patch})
+    result = _invoke(
+        harness,
+        {"file_path": str(path), "patch": patch},
     )
     assert result["ok"] is False
     assert "does not match" in result["error"]
+
 
 def test_apply_patch_records_tracker(tmp_path: Path) -> None:
     path = tmp_path / "tracked.txt"

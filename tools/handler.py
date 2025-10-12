@@ -1,11 +1,13 @@
 """Core tool handler protocol and supporting data structures."""
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, Protocol
 
+from errors import ErrorType, ToolError
 from .payload import ToolPayload
 
 
@@ -76,10 +78,22 @@ async def execute_handler(handler: ToolHandler, invocation: ToolInvocation) -> T
         result = await handler.handle(invocation)
         success = result.success
         error: str | None = None
+    except ToolError as exc:
+        success = False
+        error = exc.message
+        result = ToolOutput(
+            content=exc.message,
+            success=False,
+            metadata={"error_type": exc.error_type.value},
+        )
     except Exception as exc:  # pragma: no cover - defensive envelope
         success = False
         error = str(exc)
-        result = ToolOutput(content=f"tool execution failed: {exc}", success=False)
+        result = ToolOutput(
+            content=f"tool execution failed: {exc}",
+            success=False,
+            metadata={"error_type": ErrorType.FATAL.value},
+        )
     finally:
         duration = time.time() - start
         telemetry = getattr(invocation.turn_context, "telemetry", None)
@@ -87,13 +101,40 @@ async def execute_handler(handler: ToolHandler, invocation: ToolInvocation) -> T
             try:
                 telemetry.record_tool_execution(  # type: ignore[attr-defined]
                     tool_name=invocation.tool_name,
+                    call_id=invocation.call_id,
+                    turn=getattr(invocation.turn_context, "turn_index", 0),
                     duration=duration,
                     success=success,
                     error=error,
+                    input_size=_estimate_payload_size(invocation.payload),
+                    output_size=len((result.content or "").encode("utf-8")),
+                    truncated=bool(result.metadata and result.metadata.get("truncated")),
                 )
             except Exception:  # pragma: no cover - telemetry should not break tools
                 pass
+
+    if not result.success:
+        metadata = result.metadata or {}
+        if "error_type" not in metadata:
+            metadata["error_type"] = ErrorType.RECOVERABLE.value
+            result.metadata = metadata
+
     return result
+
+
+def _estimate_payload_size(payload: ToolPayload) -> int:
+    data: Any
+    if hasattr(payload, "arguments"):
+        data = getattr(payload, "arguments")
+    elif hasattr(payload, "payload"):
+        data = getattr(payload, "payload")
+    else:
+        data = str(payload)
+    try:
+        serialized = json.dumps(data, ensure_ascii=False)
+        return len(serialized.encode("utf-8"))
+    except Exception:  # pragma: no cover - defensive
+        return 0
 
 
 __all__ = [

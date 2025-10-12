@@ -71,11 +71,14 @@ class ToolRouter:
         )
 
         output = await self._registry.dispatch(invocation)
+        metadata = dict(output.metadata or {})
         return {
             "type": "tool_result",
             "tool_use_id": call.call_id,
             "content": output.content,
             "is_error": not output.success,
+            "metadata": metadata,
+            "error_type": metadata.get("error_type"),
         }
 
 
