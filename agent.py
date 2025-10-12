@@ -19,7 +19,15 @@ from config import load_anthropic_config
 from commands import handle_slash_command
 from prompt import PromptPacker, PackedPrompt
 from session import ContextSession, TurnDiffTracker, load_session_settings
-from tools import ToolCallRuntime, ToolRouter, build_registry_from_tools
+from tools import (
+    ConfiguredToolSpec,
+    ToolCallRuntime,
+    ToolRouter,
+    ToolSpec,
+    build_registry_from_tools,
+    MCPHandler,
+    connect_stdio_server,
+)
 
 
 try:  # pragma: no cover - platform guard
@@ -163,7 +171,31 @@ def run_agent(
 ) -> None:
     config = load_anthropic_config()
     session_settings = load_session_settings()
-    context = ContextSession.from_settings(session_settings)
+
+    mcp_definitions = {definition.name: definition for definition in session_settings.mcp.definitions}
+    mcp_enabled = bool(session_settings.mcp.enable and mcp_definitions)
+
+    def _build_mcp_factory():
+        async def factory(server: str) -> Any:
+            definition = mcp_definitions.get(server)
+            if definition is None:
+                raise ValueError(f"unknown MCP server '{server}'")
+            return await connect_stdio_server(definition)
+
+        return factory
+
+    def _compute_mcp_ttl() -> Optional[float]:
+        durations = [d.ttl_seconds for d in mcp_definitions.values() if d.ttl_seconds is not None]
+        if not durations:
+            return None
+        return min(durations)
+
+    context = ContextSession.from_settings(
+        session_settings,
+        mcp_client_factory=_build_mcp_factory() if mcp_enabled else None,
+        mcp_client_ttl=_compute_mcp_ttl() if mcp_enabled else None,
+        mcp_definitions=mcp_definitions if mcp_enabled else None,
+    )
     agents_doc = load_agents_md()
     if agents_doc:
         context.register_system_text(agents_doc.system_text())
@@ -176,6 +208,54 @@ def run_agent(
     tool_runtime = ToolCallRuntime(tool_router)
     tool_defs = [spec.spec.to_anthropic_definition() for spec in configured_specs]
     tool_map = {tool.name: tool for tool in tools}
+    registered_mcp_tools: Set[str] = set()
+
+    def _sanitize_mcp_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
+        from tools.mcp_integration import MCPToolDiscovery
+
+        discovery = MCPToolDiscovery()
+        return discovery._sanitize_json_schema(dict(schema))  # type: ignore[attr-defined]
+
+    def _register_mcp_tool_spec(spec: ToolSpec) -> None:
+        if spec.name in registered_mcp_tools:
+            return
+
+        registry.register_handler(spec.name, MCPHandler())
+        configured = ConfiguredToolSpec(spec, supports_parallel=False)
+        configured_specs.append(configured)
+        tool_router.register_spec(configured)
+        tool_defs.append(spec.to_anthropic_definition())
+        registered_mcp_tools.add(spec.name)
+
+    async def _discover_mcp_tools() -> None:
+        for server_name in mcp_definitions:
+            client = await context.get_mcp_client(server_name)
+            if client is None:
+                continue
+            try:
+                response = await client.list_tools()
+            except Exception:
+                await context.mark_mcp_client_unhealthy(server_name)
+                continue
+
+            for tool in getattr(response, "tools", []) or []:
+                fq_name = f"{server_name}/{tool.name}"
+                spec = ToolSpec(
+                    name=fq_name,
+                    description=getattr(tool, "description", "") or "",
+                    input_schema=_sanitize_mcp_schema(getattr(tool, "inputSchema", {}) or {}),
+                )
+                _register_mcp_tool_spec(spec)
+
+    if mcp_enabled:
+        try:
+            asyncio.run(_discover_mcp_tools())
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(_discover_mcp_tools())
+            finally:
+                loop.close()
     CYAN = "[96m" if use_color else ""
     GREEN = "[92m" if use_color else ""
     YELLOW = "[93m" if use_color else ""
@@ -352,7 +432,8 @@ def run_agent(
                         continue
 
                     impl = next((t for t in tools if t.name == tool_name), None)
-                    if impl is None:
+                    is_mcp_tool = tool_name in registered_mcp_tools
+                    if impl is None and not is_mcp_tool:
                         result_str = "tool not found"
                         is_error = True
                         tool_skipped = False
@@ -474,6 +555,20 @@ def run_agent(
                 read_user = False
     finally:
         listener.disarm()
+        try:
+            asyncio.run(context.close())
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(context.close())
+            finally:
+                loop.close()
+
+
+if __name__ == "__main__":
+    from run import main as run_main
+
+    run_main()
 
 
 def _normalize_content(blocks: Iterable[Any]) -> List[Dict[str, Any]]:
