@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Iterable, Sequence, Tuple, TYPE_CHECKING
 
 from .handlers.function import FunctionToolHandler
+from .handlers.shell import ShellHandler
 from .registry import ConfiguredToolSpec, ToolRegistry, ToolRegistryBuilder
 from .spec import ToolSpec
 
@@ -29,7 +30,10 @@ def build_registry_from_tools(tools: Sequence["Tool"]) -> Tuple[list[ConfiguredT
     """Create a ``ToolRegistry`` and specs list from legacy ``Tool`` instances."""
     builder = ToolRegistryBuilder()
     for tool in tools:
-        handler = FunctionToolHandler(tool)
+        if tool.name == "run_terminal_cmd":
+            handler = ShellHandler(tool)
+        else:
+            handler = FunctionToolHandler(tool)
         builder.register_handler(tool.name, handler)
         builder.add_spec(
             ToolSpec(

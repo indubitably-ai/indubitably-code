@@ -2,9 +2,11 @@ from commands import handle_slash_command
 from session import (
     CompactionSettings,
     ContextSession,
+    ExecutionPolicySettings,
     ModelSettings,
     SessionSettings,
 )
+from policies import ApprovalPolicy, SandboxPolicy
 
 
 def _make_settings(*, keep_last: int = 1) -> SessionSettings:
@@ -98,3 +100,17 @@ def test_tool_result_dedupe_cleared_on_rollback():
         and msg["content"][0].get("tool_use_id") == "toolu_demo"
         for msg in messages
     )
+
+
+def test_context_session_exec_context_updates_with_settings():
+    settings = SessionSettings(
+        execution=ExecutionPolicySettings(
+            sandbox=SandboxPolicy.STRICT,
+            approval=ApprovalPolicy.ALWAYS,
+        )
+    )
+    session = ContextSession(settings)
+    assert session.exec_context.sandbox_policy == SandboxPolicy.STRICT
+
+    session.update_setting("execution.approval", "never")
+    assert session.exec_context.approval_policy == ApprovalPolicy.NEVER

@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
+
+from policies import ExecutionContext
 
 from .compaction import CompactionEngine
 from .history import HistoryStore, MessageRecord
@@ -38,6 +41,8 @@ class ContextSession:
         self.pins = pins or PinManager()
         self.compactor = CompactionEngine(self.history, self.settings, self.meter, self.telemetry)
         self.auto_compact = settings.compaction.auto
+        self.cwd = Path.cwd()
+        self.exec_context = self._build_exec_context(settings)
         self.recent_summary: Optional[str] = None
 
     @classmethod
@@ -142,6 +147,7 @@ class ContextSession:
         self.settings = self.settings.update_with(**{dotted_key: value})
         self.compactor.settings = self.settings
         self.auto_compact = self.settings.compaction.auto
+        self.exec_context = self._build_exec_context(self.settings)
         self._update_counters()
         return self.settings
 
@@ -188,6 +194,19 @@ class ContextSession:
             used += tokens
         self.telemetry.set("pins_size", len(pins))
         return blocks
+
+    def _build_exec_context(self, settings: SessionSettings) -> ExecutionContext:
+        execution = settings.execution
+        allowed_paths = execution.allowed_paths or None
+        blocked_commands = execution.blocked_commands or None
+        return ExecutionContext(
+            cwd=self.cwd,
+            sandbox_policy=execution.sandbox,
+            approval_policy=execution.approval,
+            allowed_paths=allowed_paths,
+            blocked_commands=blocked_commands,
+            timeout_seconds=execution.timeout_seconds,
+        )
 
     def _after_change(self) -> None:
         status = self.maybe_compact()

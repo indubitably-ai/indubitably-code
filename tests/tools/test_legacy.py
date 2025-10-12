@@ -4,8 +4,10 @@ import json
 from agent import Tool
 from tools.handler import ToolInvocation
 from tools.handlers.function import FunctionToolHandler
+from tools.handlers.shell import ShellHandler
 from tools.legacy import build_registry_from_tools, tool_specs_from_tools
 from tools.payload import ToolPayload
+from tools_run_terminal_cmd import run_terminal_cmd_tool_def
 
 
 def _make_tool(name="echo", capabilities=None) -> Tool:
@@ -39,9 +41,16 @@ def test_function_handler_executes_tool_synchronously():
     assert json.loads(result.content)["payload"] == {"value": 42}
 
 
-def test_function_handler_returns_error_on_invalid_input():
-    tool = _make_tool("run_terminal_cmd")
-    handler = FunctionToolHandler(tool)
+def test_shell_handler_returns_error_on_invalid_input():
+    definition = run_terminal_cmd_tool_def()
+    tool = Tool(
+        name=definition["name"],
+        description=definition["description"],
+        input_schema=definition["input_schema"],
+        fn=lambda payload: "ok",
+        capabilities={"exec_shell"},
+    )
+    handler = ShellHandler(tool)
     invocation = ToolInvocation(
         session=None,
         turn_context=type("Ctx", (), {})(),

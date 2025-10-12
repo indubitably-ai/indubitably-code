@@ -10,6 +10,7 @@ from .settings import (
     PrivacySettings,
     SessionSettings,
     ToolLimitSettings,
+    ExecutionPolicySettings,
     load_session_settings,
 )
 from .telemetry import SessionTelemetry
@@ -30,6 +31,7 @@ __all__ = [
     "ToolLimitSettings",
     "MCPSettings",
     "PrivacySettings",
+    "ExecutionPolicySettings",
     "SessionTelemetry",
     "TokenMeter",
     "load_session_settings",
