@@ -58,3 +58,18 @@ def test_sequential_tools_execute_serially():
     duration = asyncio.run(run())
 
     assert duration >= 0.2  # two sleeps sequentially
+
+
+def test_runtime_can_be_reused_across_event_loops():
+    router = FakeRouter(set())
+    runtime = ToolCallRuntime(router)
+
+    call = ToolCall("serial", "call-1", ToolPayload.function({}))
+
+    async def run_once() -> None:
+        await runtime.execute_tool_call(session=None, turn_context=None, tracker=None, sub_id="sub", call=call)
+
+    asyncio.run(run_once())
+    asyncio.run(run_once())
+
+    assert len(router.calls) == 2
