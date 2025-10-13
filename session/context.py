@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional
+from pathlib import Path
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
+
+from policies import ExecutionContext
+from tools.mcp_pool import MCPClientFactory, MCPClientPool
 
 from .compaction import CompactionEngine
 from .history import HistoryStore, MessageRecord
 from .pins import PinManager, Pin
-from .settings import SessionSettings
+from .settings import MCPServerDefinition, SessionSettings
 from .summaries import summarize_tool_output
 from .telemetry import SessionTelemetry
 from .token_meter import TokenMeter
@@ -30,6 +34,9 @@ class ContextSession:
         telemetry: Optional[SessionTelemetry] = None,
         history: Optional[HistoryStore] = None,
         pins: Optional[PinManager] = None,
+        mcp_client_factory: Optional[MCPClientFactory] = None,
+        mcp_client_ttl: Optional[float] = None,
+        mcp_definitions: Optional[Dict[str, MCPServerDefinition]] = None,
     ) -> None:
         self.settings = settings
         self.meter = meter or TokenMeter(settings.model.name)
@@ -38,11 +45,69 @@ class ContextSession:
         self.pins = pins or PinManager()
         self.compactor = CompactionEngine(self.history, self.settings, self.meter, self.telemetry)
         self.auto_compact = settings.compaction.auto
+        self.cwd = Path.cwd()
+        self.exec_context = self._build_exec_context(settings)
         self.recent_summary: Optional[str] = None
+        self._mcp_pool: Optional[MCPClientPool] = None
+        self._mcp_definitions: Dict[str, MCPServerDefinition] = dict(mcp_definitions or {})
+        if mcp_client_factory is not None:
+            self.configure_mcp_pool(
+                mcp_client_factory,
+                ttl_seconds=mcp_client_ttl,
+                definitions=self._mcp_definitions,
+            )
 
     @classmethod
-    def from_settings(cls, settings: SessionSettings) -> "ContextSession":
-        return cls(settings)
+    def from_settings(
+        cls,
+        settings: SessionSettings,
+        *,
+        mcp_client_factory: Optional[MCPClientFactory] = None,
+        mcp_client_ttl: Optional[float] = None,
+        mcp_definitions: Optional[Dict[str, MCPServerDefinition]] = None,
+    ) -> "ContextSession":
+        return cls(
+            settings,
+            mcp_client_factory=mcp_client_factory,
+            mcp_client_ttl=mcp_client_ttl,
+            mcp_definitions=mcp_definitions,
+        )
+
+    def configure_mcp_pool(
+        self,
+        factory: MCPClientFactory,
+        *,
+        ttl_seconds: Optional[float] = None,
+        definitions: Optional[Dict[str, MCPServerDefinition]] = None,
+    ) -> None:
+        """Install an MCP client pool for this session."""
+
+        self._mcp_definitions = dict(definitions or {})
+        self._mcp_pool = MCPClientPool(factory, ttl_seconds=ttl_seconds)
+
+    async def get_mcp_client(self, server: str) -> Any:
+        """Return a pooled MCP client for *server* if pooling is configured."""
+
+        if self._mcp_pool is None:
+            return None
+        if self._mcp_definitions and server not in self._mcp_definitions:
+            return None
+        self.telemetry.incr("mcp_fetches")
+        return await self._mcp_pool.get_client(server)
+
+    async def mark_mcp_client_unhealthy(self, server: str) -> None:
+        """Evict the cached client for *server* after an error."""
+
+        if self._mcp_pool is None:
+            return
+        await self._mcp_pool.mark_unhealthy(server)
+
+    async def close(self) -> None:
+        """Release pooled resources associated with the session."""
+
+        if self._mcp_pool is not None:
+            await self._mcp_pool.shutdown()
+        self._mcp_pool = None
 
     def register_system_text(self, text: str) -> None:
         self.history.register_system(text, priority=0)
@@ -59,10 +124,49 @@ class ContextSession:
         return record
 
     def add_tool_results(self, tool_blocks: List[Dict[str, Any]], *, dedupe: bool = True) -> Optional[MessageRecord]:
-        payload = str(tool_blocks)
+        # Sanitize tool_result blocks to match Anthropic schema and avoid unsupported fields.
+        # Preserve any extra metadata on the MessageRecord.metadata to retain observability.
+        allowed_keys = {"type", "tool_use_id", "content", "is_error"}
+        sanitized_blocks: List[Dict[str, Any]] = []
+        per_block_metadata: List[Dict[str, Any]] = []
+
+        for block in tool_blocks:
+            btype = block.get("type")
+            if btype == "tool_result":
+                # Capture extra metadata before stripping
+                extra: Dict[str, Any] = {}
+                if isinstance(block, dict):
+                    # Common extras we previously attached
+                    if "metadata" in block and isinstance(block["metadata"], dict):
+                        extra["metadata"] = dict(block["metadata"])  # shallow copy
+                    if "error_type" in block:
+                        extra["error_type"] = block["error_type"]
+                    # Capture any other unexpected keys for diagnostics
+                    for k, v in block.items():
+                        if k not in allowed_keys and k not in ("metadata", "error_type"):
+                            extra.setdefault("extras", {})[k] = v
+
+                # Build sanitized block with only allowed keys; coerce content to string
+                sanitized: Dict[str, Any] = {
+                    "type": "tool_result",
+                    "tool_use_id": block.get("tool_use_id", ""),
+                    "content": str(block.get("content", "")),
+                    "is_error": bool(block.get("is_error", False)),
+                }
+                sanitized_blocks.append(sanitized)
+                per_block_metadata.append(extra)
+            else:
+                # Non tool_result blocks are passed through as-is
+                sanitized_blocks.append(block)
+                per_block_metadata.append({})
+
+        payload = str(sanitized_blocks)
         if dedupe and self.history.has_tool_hash(payload):
             return None
-        record = self.history.register_tool_results(tool_blocks, priority=1)
+        record = self.history.register_tool_results(sanitized_blocks, priority=1)
+        # Attach preserved metadata for downstream consumers (not sent to Anthropic)
+        if any(per_block_metadata):
+            record.metadata["tool_results_meta"] = per_block_metadata
         self.history.register_tool_hash(payload, record)
         self._after_change()
         return record
@@ -142,6 +246,7 @@ class ContextSession:
         self.settings = self.settings.update_with(**{dotted_key: value})
         self.compactor.settings = self.settings
         self.auto_compact = self.settings.compaction.auto
+        self.exec_context = self._build_exec_context(self.settings)
         self._update_counters()
         return self.settings
 
@@ -188,6 +293,19 @@ class ContextSession:
             used += tokens
         self.telemetry.set("pins_size", len(pins))
         return blocks
+
+    def _build_exec_context(self, settings: SessionSettings) -> ExecutionContext:
+        execution = settings.execution
+        allowed_paths = execution.allowed_paths or None
+        blocked_commands = execution.blocked_commands or None
+        return ExecutionContext(
+            cwd=self.cwd,
+            sandbox_policy=execution.sandbox,
+            approval_policy=execution.approval,
+            allowed_paths=allowed_paths,
+            blocked_commands=blocked_commands,
+            timeout_seconds=execution.timeout_seconds,
+        )
 
     def _after_change(self) -> None:
         status = self.maybe_compact()

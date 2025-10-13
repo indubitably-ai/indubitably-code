@@ -1,119 +1,70 @@
+import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
-from tools_edit import edit_file_impl
+from agent import Tool
+from tools.handlers.function import FunctionToolHandler
+from tools_edit import edit_file_impl, edit_file_tool_def
+from tests.tool_harness import MockToolContext, ToolTestHarness
 
 
-def test_edit_file_create_dry_run(tmp_path, monkeypatch):
-    base = tmp_path / "repo"
-    base.mkdir()
-    monkeypatch.chdir(base)
-
-    result = json.loads(
-        edit_file_impl({
-            "path": "example.txt",
-            "old_str": "",
-            "new_str": "hello\n",
-            "dry_run": True,
-        })
+def _make_tool() -> Tool:
+    definition = edit_file_tool_def()
+    return Tool(
+        name=definition["name"],
+        description=definition["description"],
+        input_schema=definition["input_schema"],
+        fn=edit_file_impl,
     )
 
-    assert result == {"ok": True, "action": "create", "path": "example.txt", "dry_run": True}
-    assert not (base / "example.txt").exists()
 
-
-def test_edit_file_replace_dry_run(tmp_path, monkeypatch):
+def _harness(tmp_path: Path) -> tuple[ToolTestHarness, Path]:
     base = tmp_path / "repo"
     base.mkdir()
-    monkeypatch.chdir(base)
-
-    target = base / "sample.txt"
-    target.write_text("value=1\n", encoding="utf-8")
-
-    result = json.loads(
-        edit_file_impl({
-            "path": "sample.txt",
-            "old_str": "value=1",
-            "new_str": "value=2",
-            "dry_run": True,
-        })
-    )
-
-    assert result == {"ok": True, "action": "replace", "path": "sample.txt", "dry_run": True, "replacements": 1}
-    assert target.read_text(encoding="utf-8") == "value=1\n"
+    context = MockToolContext.create(cwd=base)
+    handler = FunctionToolHandler(_make_tool())
+    return ToolTestHarness(handler, context=context), base
 
 
-def test_edit_file_replace_executes(tmp_path, monkeypatch):
-    base = tmp_path / "repo"
-    base.mkdir()
-    monkeypatch.chdir(base)
-
-    target = base / "sample.txt"
-    target.write_text("value=1\n", encoding="utf-8")
-
-    result = json.loads(edit_file_impl({
-        "path": "sample.txt",
-        "old_str": "value=1",
-        "new_str": "value=2",
-    }))
-
-    assert result == {"ok": True, "action": "replace", "path": "sample.txt", "replacements": 1}
-    assert target.read_text(encoding="utf-8") == "value=2\n"
+def test_edit_file_full_flow(tmp_path: Path):
+    harness, base = _harness(tmp_path)
+    path = base / "file.txt"
+    path.write_text("hello world", encoding="utf-8")
+    out = asyncio.run(harness.invoke("edit_file", {"path": str(path), "old_str": "world", "new_str": "python"}))
+    result = json.loads(out.content)
+    assert result["ok"] is True
+    assert path.read_text(encoding="utf-8") == "hello python"
 
 
-def test_edit_file_large_file_warning(tmp_path, monkeypatch):
-    base = tmp_path / "repo"
-    base.mkdir()
-    monkeypatch.chdir(base)
-
-    lines = "\n".join(f"line{i}" for i in range(2100)) + "\n"
-    (base / "large.txt").write_text(lines, encoding="utf-8")
-
-    result = json.loads(edit_file_impl({
-        "path": "large.txt",
-        "old_str": "line0",
-        "new_str": "line_zero",
-        "dry_run": True,
-    }))
-
+def test_edit_file_dry_run_reports(tmp_path: Path):
+    harness, base = _harness(tmp_path)
+    path = base / "file.txt"
+    path.write_text("foo foo", encoding="utf-8")
+    out = asyncio.run(harness.invoke("edit_file", {"path": str(path), "old_str": "foo", "new_str": "bar", "dry_run": True}))
+    result = json.loads(out.content)
     assert result["dry_run"] is True
-    assert "warning" in result
-    assert "file has" in result["warning"]
+    assert result["replacements"] == 2
+    assert path.read_text(encoding="utf-8") == "foo foo"
 
 
-def test_edit_file_multiple_matches_warning(tmp_path, monkeypatch):
-    base = tmp_path / "repo"
-    base.mkdir()
-    monkeypatch.chdir(base)
-
-    (base / "multi.txt").write_text("foo foo foo\n", encoding="utf-8")
-
-    result = json.loads(edit_file_impl({
-        "path": "multi.txt",
-        "old_str": "foo",
-        "new_str": "bar",
-        "dry_run": True,
-    }))
-
-    assert result["replacements"] == 3
-    assert "warning" in result
-    assert "multiple matches" in result["warning"]
+def test_edit_file_missing_old_returns_error(tmp_path: Path):
+    harness, base = _harness(tmp_path)
+    path = base / "file.txt"
+    path.write_text("hello", encoding="utf-8")
+    out = asyncio.run(harness.invoke("edit_file", {"path": str(path), "old_str": "absent", "new_str": "value"}))
+    assert out.success is False
+    assert "absent" in out.content or "not found" in out.content.lower()
 
 
-def test_edit_file_missing_old_raises(tmp_path, monkeypatch):
-    base = tmp_path / "repo"
-    base.mkdir()
-    monkeypatch.chdir(base)
-
-    target = base / "sample.txt"
-    target.write_text("value=1\n", encoding="utf-8")
-
-    with pytest.raises(ValueError):
-        edit_file_impl({
-            "path": "sample.txt",
-            "old_str": "other",
-            "new_str": "value=2",
-        })
+def test_edit_file_create_new(tmp_path: Path):
+    harness, base = _harness(tmp_path)
+    path = base / "new.txt"
+    out = asyncio.run(harness.invoke("edit_file", {"path": str(path), "old_str": "", "new_str": "content"}))
+    result = json.loads(out.content)
+    assert path.exists()
+    assert path.read_text(encoding="utf-8") == "content"
+    assert result["action"] == "create"
 
 

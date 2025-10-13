@@ -1,5 +1,6 @@
 """Interactive Anthropic agent with tool support for local development."""
 
+import asyncio
 import os
 import select
 import sys
@@ -17,7 +18,16 @@ from agents_md import load_agents_md
 from config import load_anthropic_config
 from commands import handle_slash_command
 from prompt import PromptPacker, PackedPrompt
-from session import ContextSession, load_session_settings
+from session import ContextSession, TurnDiffTracker, load_session_settings
+from tools import (
+    ConfiguredToolSpec,
+    ToolCallRuntime,
+    ToolRouter,
+    ToolSpec,
+    build_registry_from_tools,
+    MCPHandler,
+    connect_stdio_server,
+)
 
 
 try:  # pragma: no cover - platform guard
@@ -28,7 +38,7 @@ except ImportError:  # pragma: no cover - Windows fallback
     tty = None  # type: ignore[assignment]
 
 
-ToolFunc = Callable[[Dict[str, Any]], str]
+ToolFunc = Callable[..., str]
 
 
 class Tool:
@@ -161,7 +171,31 @@ def run_agent(
 ) -> None:
     config = load_anthropic_config()
     session_settings = load_session_settings()
-    context = ContextSession.from_settings(session_settings)
+
+    mcp_definitions = {definition.name: definition for definition in session_settings.mcp.definitions}
+    mcp_enabled = bool(session_settings.mcp.enable and mcp_definitions)
+
+    def _build_mcp_factory():
+        async def factory(server: str) -> Any:
+            definition = mcp_definitions.get(server)
+            if definition is None:
+                raise ValueError(f"unknown MCP server '{server}'")
+            return await connect_stdio_server(definition)
+
+        return factory
+
+    def _compute_mcp_ttl() -> Optional[float]:
+        durations = [d.ttl_seconds for d in mcp_definitions.values() if d.ttl_seconds is not None]
+        if not durations:
+            return None
+        return min(durations)
+
+    context = ContextSession.from_settings(
+        session_settings,
+        mcp_client_factory=_build_mcp_factory() if mcp_enabled else None,
+        mcp_client_ttl=_compute_mcp_ttl() if mcp_enabled else None,
+        mcp_definitions=mcp_definitions if mcp_enabled else None,
+    )
     agents_doc = load_agents_md()
     if agents_doc:
         context.register_system_text(agents_doc.system_text())
@@ -169,6 +203,59 @@ def run_agent(
     client = Anthropic()
     debug_log_path = Path(tool_debug_log_path).expanduser().resolve() if tool_debug_log_path else None
     tool_event_counter = 0
+    configured_specs, registry = build_registry_from_tools(tools)
+    tool_router = ToolRouter(registry, configured_specs)
+    tool_runtime = ToolCallRuntime(tool_router)
+    tool_defs = [spec.spec.to_anthropic_definition() for spec in configured_specs]
+    tool_map = {tool.name: tool for tool in tools}
+    registered_mcp_tools: Set[str] = set()
+
+    def _sanitize_mcp_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
+        from tools.mcp_integration import MCPToolDiscovery
+
+        discovery = MCPToolDiscovery()
+        return discovery._sanitize_json_schema(dict(schema))  # type: ignore[attr-defined]
+
+    def _register_mcp_tool_spec(spec: ToolSpec) -> None:
+        if spec.name in registered_mcp_tools:
+            return
+
+        registry.register_handler(spec.name, MCPHandler())
+        configured = ConfiguredToolSpec(spec, supports_parallel=False)
+        configured_specs.append(configured)
+        tool_router.register_spec(configured)
+        tool_defs.append(spec.to_anthropic_definition())
+        registered_mcp_tools.add(spec.name)
+
+    async def _discover_mcp_tools() -> None:
+        for server_name in mcp_definitions:
+            client = await context.get_mcp_client(server_name)
+            if client is None:
+                continue
+            try:
+                response = await client.list_tools()
+            except Exception:
+                await context.mark_mcp_client_unhealthy(server_name)
+                continue
+
+            for tool in getattr(response, "tools", []) or []:
+                fq_name = f"{server_name}/{tool.name}"
+                spec = ToolSpec(
+                    name=fq_name,
+                    description=getattr(tool, "description", "") or "",
+                    input_schema=_sanitize_mcp_schema(getattr(tool, "inputSchema", {}) or {}),
+                )
+                _register_mcp_tool_spec(spec)
+
+    if mcp_enabled:
+        try:
+            asyncio.run(_discover_mcp_tools())
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(_discover_mcp_tools())
+            finally:
+                loop.close()
     CYAN = "[96m" if use_color else ""
     GREEN = "[92m" if use_color else ""
     YELLOW = "[93m" if use_color else ""
@@ -197,6 +284,8 @@ def run_agent(
     backoff_seconds = 2.0
     rate_limit_retries = 0
     listener = EscapeListener(sys.stdin)
+
+    turn_index = 0
 
     try:
         while True:
@@ -232,8 +321,6 @@ def run_agent(
                 _notify_manual_interrupt(YELLOW, RESET, transcript_path, use_color)
                 read_user = True
                 continue
-
-            tool_defs = [t.to_definition() for t in tools]
 
             try:
                 packed = packer.pack()
@@ -278,12 +365,18 @@ def run_agent(
 
             assistant_blocks = _normalize_content(msg.content)
             context.add_assistant_message(assistant_blocks)
+            turn_index += 1
+            setattr(context, "turn_index", turn_index)
+
+            turn_tracker = TurnDiffTracker(turn_id=turn_index)
 
             interrupted = False
             interrupt_notified = False
             encountered_tool = False
             tool_results_content: List[Dict[str, Any]] = []
+            pending_calls: List[tuple] = []
 
+            fatal_event = False
             for block_dict in assistant_blocks:
                 if not interrupted and listener.consume_triggered():
                     interrupted = True
@@ -301,6 +394,7 @@ def run_agent(
                     tool_name = block_dict.get("name", "")
                     tool_input = block_dict.get("input", {})
                     tool_use_id = block_dict.get("id") or block_dict.get("tool_use_id", "tool")
+                    call = tool_router.build_tool_call(block_dict)
 
                     _print_tool_invocation(
                         tool_name,
@@ -311,39 +405,127 @@ def run_agent(
                         verbose=debug_tool_use,
                     )
 
+                    if call is None:
+                        result_str = "unrecognized tool payload"
+                        is_error = True
+                        tool_skipped = False
+                        _print_tool_result(result_str, is_error, RED if is_error else GREEN, RESET, verbose=debug_tool_use)
+                        transcript_label = "ERROR" if is_error else "RESULT"
+                        _print_transcript(transcript_path, f"TOOL {tool_name} {transcript_label}: {result_str}")
+                        tool_block = context.build_tool_result_block(
+                            tool_use_id,
+                            result_str,
+                            is_error=is_error,
+                        )
+                        tool_results_content.append(tool_block)
+                        _record_tool_debug_event(
+                            debug_tool_use,
+                            debug_log_path,
+                            turn=tool_event_counter + 1,
+                            tool_name=tool_name,
+                            payload=tool_input,
+                            result=result_str,
+                            is_error=is_error,
+                            skipped=tool_skipped,
+                        )
+                        tool_event_counter += 1
+                        continue
+
                     impl = next((t for t in tools if t.name == tool_name), None)
-                    if impl is None:
+                    is_mcp_tool = tool_name in registered_mcp_tools
+                    if impl is None and not is_mcp_tool:
                         result_str = "tool not found"
                         is_error = True
                         tool_skipped = False
+                        _print_tool_result(result_str, is_error, RED if is_error else GREEN, RESET, verbose=debug_tool_use)
+                        transcript_label = "ERROR" if is_error else "RESULT"
+                        _print_transcript(transcript_path, f"TOOL {tool_name} {transcript_label}: {result_str}")
+                        tool_block = context.build_tool_result_block(
+                            tool_use_id,
+                            result_str,
+                            is_error=is_error,
+                        )
+                        tool_results_content.append(tool_block)
+                        _record_tool_debug_event(
+                            debug_tool_use,
+                            debug_log_path,
+                            turn=tool_event_counter + 1,
+                            tool_name=tool_name,
+                            payload=tool_input,
+                            result=result_str,
+                            is_error=is_error,
+                            skipped=tool_skipped,
+                        )
+                        tool_event_counter += 1
+                        continue
                     else:
                         tool_skipped = interrupted
                         if interrupted:
                             result_str = "tool execution skipped due to user interrupt"
                             is_error = True
-                        else:
-                            try:
-                                result_str = impl.fn(tool_input)
-                                is_error = False
-                            except Exception as exc:  # pragma: no cover - defensive
-                                result_str = str(exc)
-                                is_error = True
-                        if not interrupted and listener.consume_triggered():
-                            interrupted = True
-                            if not interrupt_notified:
-                                _notify_manual_interrupt(YELLOW, RESET, transcript_path, use_color)
-                                interrupt_notified = True
+                            _print_tool_result(result_str, is_error, RED if is_error else GREEN, RESET, verbose=debug_tool_use)
+                            transcript_label = "ERROR" if is_error else "RESULT"
+                            _print_transcript(transcript_path, f"TOOL {tool_name} {transcript_label}: {result_str}")
+                            tool_block = context.build_tool_result_block(
+                                tool_use_id,
+                                result_str,
+                                is_error=is_error,
+                            )
+                            tool_results_content.append(tool_block)
+                            _record_tool_debug_event(
+                                debug_tool_use,
+                                debug_log_path,
+                                turn=tool_event_counter + 1,
+                                tool_name=tool_name,
+                                payload=tool_input,
+                                result=result_str,
+                                is_error=is_error,
+                                skipped=tool_skipped,
+                            )
+                            tool_event_counter += 1
+                            continue
 
+                        pending_calls.append((call, tool_name, tool_input, tool_use_id))
+
+            if tool_results_content:
+                context.add_tool_results(tool_results_content, dedupe=False)
+                tool_results_content = []
+
+            if pending_calls:
+                async def _run_pending() -> List[Dict[str, Any]]:
+                    tasks = [
+                        tool_runtime.execute_tool_call(
+                            session=context,
+                            turn_context=context,
+                            tracker=turn_tracker,
+                            sub_id="cli",
+                            call=call,
+                        )
+                        for (call, *_rest) in pending_calls
+                    ]
+                    return await asyncio.gather(*tasks)
+
+                results = asyncio.run(_run_pending())
+                for result, (call, tool_name, tool_input, tool_use_id) in zip(results, pending_calls):
+                    is_error = bool(result.get("is_error"))
+                    result_str = str(result.get("content", ""))
                     _print_tool_result(result_str, is_error, RED if is_error else GREEN, RESET, verbose=debug_tool_use)
                     transcript_label = "ERROR" if is_error else "RESULT"
                     _print_transcript(transcript_path, f"TOOL {tool_name} {transcript_label}: {result_str}")
 
-                    tool_block = context.build_tool_result_block(
-                        tool_use_id,
-                        result_str,
-                        is_error=is_error,
-                    )
-                    tool_results_content.append(tool_block)
+                    # Preserve preformatted tool result content/metadata as provided by runtime
+                    tool_block = {
+                        "type": "tool_result",
+                        "tool_use_id": call.call_id,
+                        "content": result_str,
+                        "is_error": is_error,
+                    }
+                    metadata = result.get("metadata")
+                    if metadata:
+                        tool_block["metadata"] = dict(metadata)
+                        if "error_type" in metadata and metadata["error_type"]:
+                            tool_block["error_type"] = metadata["error_type"]
+                    context.add_tool_results([tool_block], dedupe=False)
 
                     _record_tool_debug_event(
                         debug_tool_use,
@@ -353,13 +535,18 @@ def run_agent(
                         payload=tool_input,
                         result=result_str,
                         is_error=is_error,
-                        skipped=tool_skipped,
+                        skipped=False,
                     )
-
                     tool_event_counter += 1
 
-            if tool_results_content:
-                context.add_tool_results(tool_results_content, dedupe=False)
+                    if result.get("error_type") == "fatal" or (metadata and metadata.get("error_type") == "fatal"):
+                        fatal_event = True
+
+                pending_calls = []
+
+            if fatal_event:
+                print("Fatal tool error encountered; stopping session.", file=sys.stderr)
+                break
 
             if interrupted and not interrupt_notified:
                 _notify_manual_interrupt(YELLOW, RESET, transcript_path, use_color)
@@ -371,6 +558,20 @@ def run_agent(
                 read_user = False
     finally:
         listener.disarm()
+        try:
+            asyncio.run(context.close())
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(context.close())
+            finally:
+                loop.close()
+
+
+if __name__ == "__main__":
+    from run import main as run_main
+
+    run_main()
 
 
 def _normalize_content(blocks: Iterable[Any]) -> List[Dict[str, Any]]:

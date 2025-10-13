@@ -3,7 +3,11 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
+
+from tools.handler import ToolOutput
+from tools.schemas import RenameFileInput
+from session.turn_diff_tracker import TurnDiffTracker
 
 
 def rename_file_tool_def() -> dict:
@@ -43,34 +47,27 @@ def rename_file_tool_def() -> dict:
     }
 
 
-def rename_file_impl(input: Dict[str, Any]) -> str:
-    source_value = (input.get("source_path") or "").strip()
-    dest_value = (input.get("dest_path") or "").strip()
-    if not source_value or not dest_value:
-        raise ValueError("'source_path' and 'dest_path' are required")
-
-    overwrite = bool(input.get("overwrite", False))
-    create_parent = True if input.get("create_dest_parent") is None else bool(input.get("create_dest_parent"))
-
-    dry_run = bool(input.get("dry_run", False))
+def rename_file_impl(params: RenameFileInput, tracker: Optional[TurnDiffTracker] = None) -> ToolOutput:
+    source_value = params.source_path.strip()
+    dest_value = params.dest_path.strip()
+    overwrite = params.overwrite
+    create_parent = params.create_dest_parent
+    dry_run = params.dry_run
 
     source = Path(source_value)
     dest = Path(dest_value)
 
-    if source.resolve() == dest.resolve():
-        raise ValueError("source and destination paths are identical")
-
     if not source.exists():
-        raise FileNotFoundError(source_value)
+        return ToolOutput(content=source_value, success=False, metadata={"error_type": "not_found"})
     if source.is_dir():
-        raise IsADirectoryError("source path is a directory")
+        return ToolOutput(content="source path is a directory", success=False, metadata={"error_type": "is_directory"})
 
     dest_existed = dest.exists()
     if dest_existed:
         if not overwrite:
-            raise FileExistsError(dest_value)
+            return ToolOutput(content=dest_value, success=False, metadata={"error_type": "exists"})
         if dest.is_dir():
-            raise IsADirectoryError("destination path is a directory")
+            return ToolOutput(content="destination path is a directory", success=False, metadata={"error_type": "is_directory"})
 
     dest_parent = dest.parent
     if not dest_parent.exists():
@@ -78,19 +75,46 @@ def rename_file_impl(input: Dict[str, Any]) -> str:
             if not dry_run:
                 dest_parent.mkdir(parents=True, exist_ok=True)
         else:
-            raise FileNotFoundError(f"destination parent missing: {dest_parent}")
+            return ToolOutput(content=f"destination parent missing: {dest_parent}", success=False, metadata={"error_type": "not_found"})
 
     if dry_run:
-        return json.dumps({
+        return ToolOutput(content=json.dumps({
             "ok": True,
             "action": "rename",
             "source": source_value,
             "destination": dest_value,
             "overwritten": bool(dest_existed),
             "dry_run": True,
-        })
+        }), success=True)
 
-    os.replace(source, dest)
+    if tracker is not None:
+        tracker.lock_file(source)
+        dest_locked = False
+        if source.resolve() != dest.resolve():
+            tracker.lock_file(dest)
+            dest_locked = True
+    else:
+        dest_locked = False
+
+    try:
+        os.replace(source, dest)
+        if tracker is not None:
+            try:
+                dest_resolved = dest.resolve()
+            except FileNotFoundError:
+                dest_resolved = dest
+            tracker.record_edit(
+                path=source,
+                tool_name="rename_file",
+                action="rename",
+                old_content=str(source.resolve()),
+                new_content=str(dest_resolved),
+            )
+    finally:
+        if tracker is not None:
+            tracker.unlock_file(source)
+            if dest_locked:
+                tracker.unlock_file(dest)
 
     result = {
         "ok": True,
@@ -99,6 +123,4 @@ def rename_file_impl(input: Dict[str, Any]) -> str:
         "destination": dest_value,
         "overwritten": bool(dest_existed),
     }
-    return json.dumps(result)
-
-
+    return ToolOutput(content=json.dumps(result), success=True)

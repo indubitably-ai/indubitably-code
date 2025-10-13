@@ -1,12 +1,14 @@
 """Headless agent runner with tool auditing and policy controls."""
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Sequence, Set
 
 from anthropic import Anthropic, RateLimitError
 
@@ -14,7 +16,17 @@ from agent import Tool
 from agents_md import load_agents_md
 from config import load_anthropic_config
 from prompt import PromptPacker, PackedPrompt
-from session import ContextSession, SessionSettings, load_session_settings
+from session import ContextSession, SessionSettings, TurnDiffTracker, load_session_settings, MCPServerDefinition
+from tools import (
+    ConfiguredToolSpec,
+    ToolCall,
+    ToolCallRuntime,
+    ToolRouter,
+    ToolSpec,
+    build_registry_from_tools,
+    MCPHandler,
+    connect_stdio_server,
+)
 
 
 @dataclass
@@ -26,6 +38,7 @@ class ToolEvent:
     is_error: bool
     skipped: bool
     paths: List[str] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -36,7 +49,20 @@ class ToolEvent:
             "is_error": self.is_error,
             "skipped": self.skipped,
             "paths": list(self.paths),
+            "metadata": dict(self.metadata),
         }
+
+
+@dataclass
+class _PendingToolCall:
+    call: ToolCall
+    tool: Optional[Tool]
+    tool_input: Dict[str, Any]
+    tool_use_id: str
+    tool_name: str
+    turn_idx: int
+    tracker: TurnDiffTracker
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -61,6 +87,7 @@ class AgentRunResult:
     turns_used: int
     stopped_reason: str
     conversation: List[Dict[str, Any]]
+    turn_summaries: List[Dict[str, Any]]
 
 
 class AgentRunner:
@@ -71,11 +98,15 @@ class AgentRunner:
         *,
         client: Optional[Anthropic] = None,
         session_settings: Optional[SessionSettings] = None,
+        mcp_client_factory: Optional[Callable[[str], Awaitable[Any]]] = None,
+        mcp_client_ttl: Optional[float] = None,
     ) -> None:
         self.options = options
         self.config = load_anthropic_config()
         self.session_settings = session_settings or load_session_settings()
         self.client = client or Anthropic()
+        self._external_mcp_factory = mcp_client_factory
+        self._external_mcp_ttl = mcp_client_ttl
         self.all_tools = list(tools)
         self.active_tools = self._filter_tools()
         self.tool_map = {tool.name: tool for tool in self.active_tools}
@@ -83,9 +114,29 @@ class AgentRunner:
         self.edited_files: Set[str] = set()
         self.context: Optional[ContextSession] = None
         self._packer: Optional[PromptPacker] = None
+        self.turn_summaries: List[Dict[str, Any]] = []
+        self._turn_trackers: List[TurnDiffTracker] = []
+
+        self._configured_specs, self._tool_registry = build_registry_from_tools(self.active_tools)
+        self._tool_router = ToolRouter(self._tool_registry, self._configured_specs)
+        self._tool_runtime = ToolCallRuntime(self._tool_router)
+        self._tool_definitions = [spec.spec.to_anthropic_definition() for spec in self._configured_specs]
+
+        self._mcp_definitions: Dict[str, MCPServerDefinition] = {
+            definition.name: definition for definition in self.session_settings.mcp.definitions
+        }
+        self._mcp_enabled = bool(
+            self._external_mcp_factory or (
+                self.session_settings.mcp.enable and self._mcp_definitions
+            )
+        )
+        self._registered_mcp_tools: Set[str] = set()
 
         if options.allowed_tools:
-            missing = options.allowed_tools - set(self.tool_map)
+            known = set(self.tool_map)
+            if self._mcp_enabled:
+                known |= set(self._mcp_definitions)
+            missing = {tool for tool in options.allowed_tools if tool not in known}
             if missing and options.verbose:
                 print(f"Warning: allowed tools not available: {sorted(missing)}")
 
@@ -100,14 +151,25 @@ class AgentRunner:
 
         self.tool_events = []
         self.edited_files = set()
+        self.turn_summaries = []
+        self._turn_trackers = []
 
-        context = ContextSession.from_settings(self.session_settings)
+        definitions = self._mcp_definitions if (self._mcp_enabled and self._mcp_definitions) else None
+        context = ContextSession.from_settings(
+            self.session_settings,
+            mcp_client_factory=self._build_mcp_client_factory() if self._mcp_enabled else None,
+            mcp_client_ttl=self._compute_mcp_ttl(),
+            mcp_definitions=definitions,
+        )
         agents_doc = load_agents_md()
         if agents_doc:
             context.register_system_text(agents_doc.system_text())
         packer = PromptPacker(context)
         self.context = context
         self._packer = packer
+
+        if self._mcp_enabled:
+            self._initialize_mcp_support(context)
 
         if initial_conversation:
             self._seed_context(context, initial_conversation)
@@ -118,6 +180,7 @@ class AgentRunner:
         stopped_reason = "completed"
         turns_used = 0
         should_rollback = True
+        fatal_event: Optional[ToolEvent] = None
 
         for turn_idx in range(1, self.options.max_turns + 1):
             packed = packer.pack()
@@ -132,9 +195,14 @@ class AgentRunner:
             context.add_assistant_message(assistant_blocks)
             should_rollback = False
 
+            setattr(context, "turn_index", turn_idx)
+
+            turn_tracker = TurnDiffTracker(turn_id=turn_idx)
+
             tool_results_content: List[Dict[str, Any]] = []
             tool_error = False
             encountered_tool = False
+            pending_calls: List[_PendingToolCall] = []
 
             for block in assistant_blocks:
                 btype = block.get("type")
@@ -142,24 +210,202 @@ class AgentRunner:
                     text_outputs.append(block.get("text", ""))
                 elif btype == "tool_use":
                     encountered_tool = True
-                    event, tool_result = self._handle_tool_use(block, turn_idx)
-                    tool_results_content.append(tool_result)
+                    block_dict = _normalize_block(block)
+                    tool_name = block_dict.get("name", "")
+                    tool_input = block_dict.get("input", {}) if isinstance(block_dict.get("input"), dict) else {}
+                    tool_use_id = block_dict.get("id") or block_dict.get("tool_use_id", f"tool-{turn_idx}")
+                    call = self._tool_router.build_tool_call(block_dict)
+                    tool = self.tool_map.get(tool_name)
+
+                    if call is None:
+                        block_result, event = self._record_tool_event(
+                            turn_idx=turn_idx,
+                            tool_name=tool_name,
+                            tool_input=tool_input,
+                            tool_use_id=tool_use_id,
+                            result_str="unrecognized tool payload",
+                            is_error=True,
+                            skipped=False,
+                            tool=None,
+                        )
+                        tool_results_content.append(block_result)
+                        tool_error = tool_error or event.is_error
+                        if event.metadata.get("error_type") == "fatal":
+                            fatal_event = event
+                            stopped_reason = "fatal_tool_error"
+                            turns_used = turn_idx
+                            break
+                        continue
+
+                    if not self._is_tool_allowed(tool_name):
+                        block_result, event = self._record_tool_event(
+                            turn_idx=turn_idx,
+                            tool_name=tool_name,
+                            tool_input=tool_input,
+                            tool_use_id=tool_use_id,
+                            result_str=f"tool '{tool_name}' not permitted",
+                            is_error=True,
+                            skipped=False,
+                            tool=None,
+                        )
+                        tool_results_content.append(block_result)
+                        tool_error = tool_error or event.is_error
+                        if event.metadata.get("error_type") == "fatal":
+                            fatal_event = event
+                            stopped_reason = "fatal_tool_error"
+                            turns_used = turn_idx
+                            break
+                        continue
+
+                    if tool is None and self._is_mcp_tool(tool_name):
+                        tool = None
+                    elif tool is None:
+                        block_result, event = self._record_tool_event(
+                            turn_idx=turn_idx,
+                            tool_name=tool_name,
+                            tool_input=tool_input,
+                            tool_use_id=tool_use_id,
+                            result_str=f"tool '{tool_name}' not available",
+                            is_error=True,
+                            skipped=False,
+                            tool=None,
+                        )
+                        tool_results_content.append(block_result)
+                        tool_error = tool_error or event.is_error
+                        if event.metadata.get("error_type") == "fatal":
+                            fatal_event = event
+                            stopped_reason = "fatal_tool_error"
+                            turns_used = turn_idx
+                            break
+                        continue
+
+                    if self.options.dry_run:
+                        block_result, event = self._record_tool_event(
+                            turn_idx=turn_idx,
+                            tool_name=tool_name,
+                            tool_input=tool_input,
+                            tool_use_id=tool_use_id,
+                            result_str="dry-run: execution skipped",
+                            is_error=True,
+                            skipped=True,
+                            tool=tool,
+                        )
+                        tool_results_content.append(block_result)
+                        tool_error = tool_error or event.is_error
+                        if event.metadata.get("error_type") == "fatal":
+                            fatal_event = event
+                            stopped_reason = "fatal_tool_error"
+                            turns_used = turn_idx
+                            break
+                        continue
+
+                    call_metadata: Dict[str, Any] = {}
+                    if tool is not None and tool.capabilities and "write_fs" in tool.capabilities:
+                        exec_context = getattr(context, "exec_context", None)
+                        if exec_context and exec_context.requires_approval(tool.name, is_write=True):
+                            approved, call_metadata = self._confirm_write_approval(
+                                context,
+                                tool=tool,
+                                tool_input=tool_input,
+                            )
+                            if not approved:
+                                block_result, event = self._record_tool_event(
+                                    turn_idx=turn_idx,
+                                    tool_name=tool_name,
+                                    tool_input=tool_input,
+                                    tool_use_id=tool_use_id,
+                                    result_str="Tool execution denied by approval policy",
+                                    is_error=True,
+                                    skipped=True,
+                                    tool=tool,
+                                    extra_metadata=call_metadata,
+                                )
+                                tool_results_content.append(block_result)
+                                tool_error = tool_error or event.is_error
+                                if event.metadata.get("error_type") == "fatal":
+                                    fatal_event = event
+                                    stopped_reason = "fatal_tool_error"
+                                    turns_used = turn_idx
+                                    break
+                                continue
+
+                    pending_calls.append(
+                        _PendingToolCall(
+                            call=call,
+                            tool=tool,
+                            tool_input=tool_input,
+                            tool_use_id=tool_use_id,
+                            turn_idx=turn_idx,
+                            tool_name=tool_name,
+                            tracker=turn_tracker,
+                            metadata=call_metadata,
+                        )
+                    )
+
+            if not encountered_tool and not fatal_event:
+                turns_used = turn_idx
+                break
+
+            if tool_error and self.options.exit_on_tool_error and not fatal_event:
+                stopped_reason = "tool_error"
+                turns_used = turn_idx
+                break
+
+            if pending_calls and not fatal_event:
+                runtime_blocks = self._execute_pending_calls(pending_calls)
+                for pending, runtime_result in zip(pending_calls, runtime_blocks):
+                    updated_block = runtime_result
+                    extra_metadata = pending.metadata or None
+                    if pending.metadata:
+                        merged_meta = dict(runtime_result.get("metadata", {}))
+                        merged_meta.update(pending.metadata)
+                        updated_block = dict(runtime_result)
+                        updated_block["metadata"] = merged_meta
+                        if "error_type" not in updated_block and "error_type" in merged_meta:
+                            updated_block["error_type"] = merged_meta["error_type"]
+
+                    result_block, event = self._record_tool_event(
+                        turn_idx=pending.turn_idx,
+                        tool_name=pending.tool_name,
+                        tool_input=pending.tool_input,
+                        tool_use_id=pending.tool_use_id,
+                        result_str=str(updated_block.get("content", "")),
+                        is_error=bool(updated_block.get("is_error")),
+                        skipped=False,
+                        tool=pending.tool,
+                        prebuilt_block=updated_block,
+                        extra_metadata=extra_metadata,
+                    )
+                    tool_results_content.append(result_block)
                     tool_error = tool_error or event.is_error
+                    if event.metadata.get("error_type") == "fatal":
+                        fatal_event = event
+                        stopped_reason = "fatal_tool_error"
+                        turns_used = pending.turn_idx
+                        break
+
+                pending_calls = []
 
             if tool_results_content:
                 context.add_tool_results(tool_results_content, dedupe=False)
 
-            if not encountered_tool:
-                turns_used = turn_idx
+            self._log_turn_diff(turn_idx, turn_tracker)
+            self._turn_trackers.append(turn_tracker)
+
+            if fatal_event:
                 break
 
-            if tool_error and self.options.exit_on_tool_error:
+            if tool_error and self.options.exit_on_tool_error and not fatal_event:
                 stopped_reason = "tool_error"
                 turns_used = turn_idx
                 break
+
         else:
             turns_used = self.options.max_turns
             stopped_reason = "max_turns"
+
+        if fatal_event and stopped_reason != "fatal_tool_error":
+            stopped_reason = "fatal_tool_error"
 
         final_response = "\n".join(txt for txt in text_outputs if txt).strip()
         conversation_payload = context.build_messages()
@@ -171,7 +417,33 @@ class AgentRunner:
             turns_used=turns_used,
             stopped_reason=stopped_reason,
             conversation=conversation_payload,
+            turn_summaries=self.turn_summaries,
         )
+
+    def undo_last_turn(self) -> List[str]:
+        if not self._turn_trackers:
+            return []
+
+        tracker = self._turn_trackers.pop()
+        operations = tracker.undo()
+        if not operations:
+            return operations
+
+        if self.turn_summaries:
+            self.turn_summaries.pop()
+
+        if self.options.changes_log_path:
+            entry = {
+                "turn": tracker.turn_id,
+                "undo": True,
+                "operations": operations,
+            }
+            entry["paths"] = sorted({str(edit.path) for edit in tracker.edits})
+            self.options.changes_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.options.changes_log_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+        return operations
 
 
     def _seed_context(self, context: ContextSession, conversation: List[Dict[str, Any]]) -> None:
@@ -211,7 +483,7 @@ class AgentRunner:
                     "model": self.config.model,
                     "max_tokens": self.config.max_tokens,
                     "messages": prompt.messages,
-                    "tools": [tool.to_definition() for tool in self.active_tools],
+                    "tools": list(self._tool_definitions),
                 }
                 if prompt.system:
                     request["system"] = prompt.system
@@ -241,73 +513,6 @@ class AgentRunner:
                 continue
             result.append(tool)
         return result
-
-    def _handle_tool_use(self, block: Any, turn_idx: int) -> tuple[ToolEvent, Dict[str, Any]]:
-        if isinstance(block, dict):
-            tool_name = block.get("name", "")
-            tool_input = block.get("input", {})
-            tool_use_id = block.get("id") or block.get("tool_use_id", f"tool-{turn_idx}")
-        else:
-            tool_name = getattr(block, "name", "")
-            tool_input = getattr(block, "input", {})
-            tool_use_id = getattr(block, "id", f"tool-{turn_idx}")
-        tool = self.tool_map.get(tool_name)
-
-        skipped = False
-        is_error = False
-        result_str = ""
-
-        if tool is None:
-            is_error = True
-            result_str = f"tool '{tool_name}' not permitted"
-        elif self.options.dry_run:
-            skipped = True
-            is_error = True
-            result_str = "dry-run: execution skipped"
-        else:
-            try:
-                result_str = tool.fn(tool_input)
-            except Exception as exc:  # pragma: no cover - defensive
-                is_error = True
-                result_str = str(exc)
-
-        if tool is not None and not is_error and not skipped:
-            for path in _extract_paths(tool_input):
-                self.edited_files.add(path)
-                self._write_change_record(tool_name, path, result_str)
-        elif tool is not None and tool.capabilities and "write_fs" in tool.capabilities:
-            for path in _extract_paths(tool_input):
-                # Track attempted writes even if failing to aid auditing.
-                self.edited_files.add(path)
-
-        event = ToolEvent(
-            turn=turn_idx,
-            tool_name=tool_name,
-            raw_input=tool_input,
-            result=result_str,
-            is_error=is_error,
-            skipped=skipped,
-            paths=_extract_paths(tool_input),
-        )
-        self.tool_events.append(event)
-        self._write_audit_event(event)
-        self._handle_tool_debug(event)
-
-        if self.context is not None:
-            tool_result = self.context.build_tool_result_block(
-                tool_use_id,
-                result_str,
-                is_error=is_error,
-            )
-        else:  # pragma: no cover - defensive fallback
-            tool_result = {
-                "type": "tool_result",
-                "tool_use_id": tool_use_id,
-                "content": result_str,
-                "is_error": is_error,
-            }
-
-        return event, tool_result
 
     def _handle_tool_debug(self, event: ToolEvent) -> None:
         if not self.options.debug_tool_use:
@@ -345,6 +550,296 @@ class AgentRunner:
         }
         with self.options.changes_log_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def _execute_pending_calls(self, pending_calls: List[_PendingToolCall]) -> List[Dict[str, Any]]:
+        if not pending_calls:
+            return []
+
+        async def _runner() -> List[Dict[str, Any]]:
+            tasks = [
+                self._tool_runtime.execute_tool_call(
+                    session=self.context,
+                    turn_context=self.context,
+                    tracker=pending.tracker,
+                    sub_id=f"turn-{pending.turn_idx}",
+                    call=pending.call,
+                )
+                for pending in pending_calls
+            ]
+            return await asyncio.gather(*tasks)
+
+        return asyncio.run(_runner())
+
+    def _log_turn_diff(self, turn_idx: int, tracker: TurnDiffTracker) -> None:
+        if not tracker.edits:
+            return
+
+        paths: Set[str] = set()
+        cwd = Path.cwd()
+        for edit in tracker.edits:
+            resolved = edit.path
+            try:
+                relative = resolved.resolve().relative_to(cwd)
+                paths.add(str(relative))
+            except ValueError:
+                paths.add(str(resolved.resolve()))
+
+        self.edited_files.update(paths)
+
+        entry = {
+            "turn": turn_idx,
+            "summary": tracker.generate_summary(),
+            "paths": sorted(paths),
+        }
+
+        conflict_report = tracker.generate_conflict_report()
+        if conflict_report:
+            entry["conflicts"] = list(tracker.conflicts)
+            entry["conflict_report"] = conflict_report
+
+        diff = tracker.generate_unified_diff()
+        if diff:
+            entry["diff"] = diff
+
+        self.turn_summaries.append(entry)
+
+        if self.options.changes_log_path:
+            self.options.changes_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.options.changes_log_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+    def _build_mcp_client_factory(self) -> Callable[[str], Awaitable[Any]]:
+        if self._external_mcp_factory is not None:
+            return self._external_mcp_factory
+
+        async def factory(server: str) -> Any:
+            definition = self._mcp_definitions.get(server)
+            if definition is None:
+                raise ValueError(f"unknown MCP server '{server}'")
+            return await connect_stdio_server(definition)
+
+        return factory
+
+    def _compute_mcp_ttl(self) -> Optional[float]:
+        if self._external_mcp_ttl is not None:
+            return self._external_mcp_ttl
+        if not self._mcp_enabled:
+            return None
+        durations = [d.ttl_seconds for d in self._mcp_definitions.values() if d.ttl_seconds is not None]
+        if not durations:
+            return None
+        return min(durations)
+
+    def _initialize_mcp_support(self, context: ContextSession) -> None:
+        async def loader() -> None:
+            await self._discover_mcp_tools(context)
+
+        try:
+            asyncio.run(loader())
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(loader())
+            finally:
+                loop.close()
+
+    async def _discover_mcp_tools(self, context: ContextSession) -> None:
+        if not self._mcp_enabled:
+            return
+
+        for server_name in self._mcp_definitions:
+            client = await context.get_mcp_client(server_name)
+            if client is None:
+                continue
+            try:
+                response = await client.list_tools()
+            except Exception:
+                await context.mark_mcp_client_unhealthy(server_name)
+                continue
+
+            for tool in getattr(response, "tools", []) or []:
+                fq_name = f"{server_name}/{tool.name}"
+                if fq_name in self._registered_mcp_tools:
+                    continue
+                schema = getattr(tool, "inputSchema", {}) or {}
+                spec = ToolSpec(
+                    name=fq_name,
+                    description=getattr(tool, "description", "") or "",
+                    input_schema=self._sanitize_mcp_schema(schema),
+                )
+                self._register_mcp_tool_spec(spec)
+
+    def _register_mcp_tool_spec(self, spec: ToolSpec) -> None:
+        if spec.name in self._registered_mcp_tools:
+            return
+
+        handler = MCPHandler()
+        self._tool_registry.register_handler(spec.name, handler)
+        configured = ConfiguredToolSpec(spec, supports_parallel=False)
+        self._configured_specs.append(configured)
+        self._tool_router.register_spec(configured)
+        self._tool_definitions.append(spec.to_anthropic_definition())
+        self._registered_mcp_tools.add(spec.name)
+
+    def _sanitize_mcp_schema(self, schema: Dict[str, Any]) -> Dict[str, Any]:
+        from tools.mcp_integration import MCPToolDiscovery
+
+        discovery = MCPToolDiscovery()
+        return discovery._sanitize_json_schema(dict(schema))  # type: ignore[attr-defined]
+
+    def _is_mcp_tool(self, name: str) -> bool:
+        if '/' not in name:
+            return False
+        server, _child = name.split('/', 1)
+        return server in self._mcp_definitions
+
+    def _is_tool_allowed(self, tool_name: str) -> bool:
+        if tool_name in self.options.blocked_tools:
+            return False
+        server_prefix = tool_name.split('/', 1)[0] if '/' in tool_name else None
+        if server_prefix and server_prefix in self.options.blocked_tools:
+            return False
+
+        if not self.options.allowed_tools:
+            return True
+        if tool_name in self.options.allowed_tools:
+            return True
+        if server_prefix and server_prefix in self.options.allowed_tools:
+            return True
+        return False
+
+
+    async def close(self) -> None:
+        """Release resources held by the runner."""
+
+        if self.context is not None:
+            await self.context.close()
+
+    def _record_tool_event(
+        self,
+        *,
+        turn_idx: int,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        tool_use_id: str,
+        result_str: str,
+        is_error: bool,
+        skipped: bool,
+        tool: Optional[Tool],
+        prebuilt_block: Optional[Dict[str, Any]] = None,
+        extra_metadata: Optional[Dict[str, Any]] = None,
+    ) -> tuple[Dict[str, Any], ToolEvent]:
+        paths = _extract_paths(tool_input)
+        metadata: Dict[str, Any] = {}
+        if prebuilt_block is not None:
+            metadata = dict(prebuilt_block.get("metadata", {}))
+        if extra_metadata:
+            metadata.update(extra_metadata)
+        error_type = metadata.get("error_type")
+        if error_type is None and prebuilt_block is not None:
+            error_type = prebuilt_block.get("error_type")
+
+        event = ToolEvent(
+            turn=turn_idx,
+            tool_name=tool_name,
+            raw_input=tool_input,
+            result=result_str,
+            is_error=is_error,
+            skipped=skipped,
+            paths=paths,
+            metadata=metadata,
+        )
+        self.tool_events.append(event)
+        self._write_audit_event(event)
+        self._handle_tool_debug(event)
+
+        if tool is not None:
+            if not is_error and not skipped:
+                for path in paths:
+                    self.edited_files.add(path)
+                    self._write_change_record(tool.name, path, result_str)
+            elif tool.capabilities and "write_fs" in tool.capabilities:
+                for path in paths:
+                    self.edited_files.add(path)
+
+        if prebuilt_block is not None:
+            block = dict(prebuilt_block)
+        elif self.context is not None:
+            block = self.context.build_tool_result_block(
+                tool_use_id,
+                result_str,
+                is_error=is_error,
+            )
+        else:
+            block = {
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": result_str,
+                "is_error": is_error,
+            }
+
+        if metadata:
+            block_metadata = dict(block.get("metadata", {}))
+            block_metadata.update(metadata)
+            block["metadata"] = block_metadata
+        if error_type and "error_type" not in block:
+            block["error_type"] = error_type
+
+        return block, event
+
+    def _confirm_write_approval(
+        self,
+        context: ContextSession,
+        *,
+        tool: Tool,
+        tool_input: Dict[str, Any],
+    ) -> tuple[bool, Dict[str, Any]]:
+        exec_context = getattr(context, "exec_context", None)
+        metadata: Dict[str, Any] = {"approval_required": True}
+        policy = getattr(exec_context, "approval_policy", None)
+        if policy is not None:
+            metadata["approval_policy"] = getattr(policy, "value", str(policy))
+
+        paths = _extract_paths(tool_input)
+        if paths:
+            metadata["approval_paths"] = list(paths)
+
+        approver = getattr(context, "request_approval", None)
+        if approver is None:
+            metadata["approval_granted"] = False
+            metadata["approval_error"] = "no approval callback configured"
+            return False, metadata
+
+        try:
+            try:
+                result = approver(tool_name=tool.name, command=None, paths=list(paths))
+            except TypeError:
+                result = approver(tool_name=tool.name, command=None)
+        except Exception as exc:
+            metadata["approval_granted"] = False
+            metadata["approval_error"] = str(exc)
+            return False, metadata
+
+        resolved = self._resolve_awaitable(result)
+        approved = bool(resolved)
+        metadata["approval_granted"] = approved
+        return approved, metadata
+
+    @staticmethod
+    def _resolve_awaitable(result: Any) -> Any:
+        if not inspect.isawaitable(result):
+            return result
+        try:
+            return asyncio.run(result)
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            try:
+                asyncio.set_event_loop(loop)
+                return loop.run_until_complete(result)
+            finally:
+                asyncio.set_event_loop(None)
+                loop.close()
 
 
 def _jsonable(value: Any) -> Any:

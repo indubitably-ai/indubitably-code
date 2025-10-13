@@ -2,6 +2,8 @@ import os
 import json
 from pathlib import Path
 from typing import Dict, Any, List, Tuple, Optional
+from tools.handler import ToolOutput
+from tools.schemas import ListFilesInput
 from fnmatch import fnmatch
 
 
@@ -150,23 +152,17 @@ def _gather_entries(start: str, recursive: bool, max_depth: Optional[int], glob_
     return results
 
 
-def list_files_impl(input: Dict[str, Any]) -> str:
-    start = input.get("path") or "."
-    recursive = True if input.get("recursive") is None else bool(input.get("recursive"))
-    max_depth = input.get("max_depth")
-    if max_depth is not None:
-        max_depth = int(max_depth)
-    glob_pat = input.get("glob")
-    ignore_globs = input.get("ignore_globs") or []
-    include_files = True if input.get("include_files") is None else bool(input.get("include_files"))
-    include_dirs = True if input.get("include_dirs") is None else bool(input.get("include_dirs"))
-    sort_by = input.get("sort_by") or "name"
-    sort_order = input.get("sort_order") or "asc"
-    head_limit = input.get("head_limit")
-    if head_limit is not None:
-        head_limit = int(head_limit)
-        if head_limit <= 0:
-            head_limit = None
+def list_files_impl(params: ListFilesInput) -> ToolOutput:
+    start = params.path or "."
+    recursive = params.recursive
+    max_depth = params.max_depth
+    glob_pat = params.glob
+    ignore_globs = params.ignore_globs or []
+    include_files = params.include_files
+    include_dirs = params.include_dirs
+    sort_by = params.sort_by
+    sort_order = params.sort_order
+    head_limit = params.head_limit
 
     need_stat = sort_by in ("mtime", "size")
 
@@ -181,7 +177,6 @@ def list_files_impl(input: Dict[str, Any]) -> str:
         need_stat=need_stat,
     )
 
-    # Sort
     reverse = (sort_order == "desc")
     if sort_by == "name":
         entries.sort(key=lambda t: t[0].lower(), reverse=reverse)
@@ -190,11 +185,10 @@ def list_files_impl(input: Dict[str, Any]) -> str:
     elif sort_by == "size":
         entries.sort(key=lambda t: (t[3] or 0, t[0].lower()), reverse=reverse)
 
-    # Apply head limit and return just the path strings
     if head_limit is not None:
         entries = entries[:head_limit]
 
     out: List[str] = [t[0] for t in entries]
-    return json.dumps(out)
+    return ToolOutput(content=json.dumps(out), success=True)
 
 

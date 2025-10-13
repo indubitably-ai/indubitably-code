@@ -2,6 +2,8 @@ import json
 import os
 import time
 
+from tools.handler import ToolOutput
+from tools.schemas import GlobFileSearchInput
 from tools_glob_file_search import glob_file_search_impl
 
 
@@ -17,6 +19,7 @@ def test_glob_file_search_returns_relative_paths(tmp_path, monkeypatch):
 
     monkeypatch.chdir(base)
 
-    results = json.loads(glob_file_search_impl({"glob_pattern": "*.py", "head_limit": 1}))
-
-    assert results == ["src/util.py"]
+    result: ToolOutput = glob_file_search_impl(GlobFileSearchInput(glob_pattern="*.py", head_limit=1))
+    assert result.success is True
+    paths = json.loads(result.content)
+    assert paths == ["src/util.py"]

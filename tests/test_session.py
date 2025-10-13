@@ -2,9 +2,14 @@ from commands import handle_slash_command
 from session import (
     CompactionSettings,
     ContextSession,
+    ExecutionPolicySettings,
     ModelSettings,
     SessionSettings,
+    load_session_settings,
 )
+from policies import ApprovalPolicy, SandboxPolicy
+import asyncio
+import pytest
 
 
 def _make_settings(*, keep_last: int = 1) -> SessionSettings:
@@ -98,3 +103,67 @@ def test_tool_result_dedupe_cleared_on_rollback():
         and msg["content"][0].get("tool_use_id") == "toolu_demo"
         for msg in messages
     )
+
+
+def test_context_session_exec_context_updates_with_settings():
+    settings = SessionSettings(
+        execution=ExecutionPolicySettings(
+            sandbox=SandboxPolicy.STRICT,
+            approval=ApprovalPolicy.ALWAYS,
+        )
+    )
+    session = ContextSession(settings)
+    assert session.exec_context.sandbox_policy == SandboxPolicy.STRICT
+
+    session.update_setting("execution.approval", "never")
+    assert session.exec_context.approval_policy == ApprovalPolicy.NEVER
+
+
+def test_context_session_mcp_pool_reuses_clients():
+    calls = []
+
+    async def factory(server: str):
+        calls.append(server)
+        return {"server": server}
+
+    async def _run():
+        session = ContextSession(SessionSettings())
+        session.configure_mcp_pool(factory, ttl_seconds=5.0)
+
+        client1 = await session.get_mcp_client("alpha")
+        client2 = await session.get_mcp_client("alpha")
+
+        assert client1 is client2
+        assert calls == ["alpha"]
+
+        await session.close()
+
+    asyncio.run(_run())
+
+
+def test_load_session_settings_parses_mcp_definitions(tmp_path):
+    config = tmp_path / "config.toml"
+    config.write_text(
+        """
+[mcp]
+  enable = true
+  [[mcp.definitions]]
+  name = "chrome-devtools"
+  command = "npx"
+  args = ["-y", "chrome-devtools-mcp@latest"]
+  ttl_seconds = 120
+  startup_timeout_ms = 5000
+  [mcp.definitions.env]
+  DEBUG = "*"
+  """
+    )
+    settings = load_session_settings(config)
+    assert settings.mcp.enable is True
+    assert settings.mcp.definitions
+    definition = settings.mcp.definitions[0]
+    assert definition.name == "chrome-devtools"
+    assert definition.command == "npx"
+    assert definition.args == ("-y", "chrome-devtools-mcp@latest")
+    assert dict(definition.env)["DEBUG"] == "*"
+    assert definition.ttl_seconds == 120
+    assert definition.startup_timeout_ms == 5000

@@ -5,8 +5,9 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
-
-_EDIT_MODES = {"insert_before", "insert_after", "replace", "delete"}
+from tools.handler import ToolOutput
+from tools.schemas import LINE_EDIT_MODES, LineEditInput
+from session.turn_diff_tracker import TurnDiffTracker
 
 _LARGE_FILE_WARNING_LINES = 2000
 
@@ -25,7 +26,7 @@ def line_edit_tool_def() -> dict:
                 "path": {"type": "string", "description": "Path to the target text file."},
                 "mode": {
                     "type": "string",
-                    "enum": sorted(_EDIT_MODES),
+                    "enum": sorted(LINE_EDIT_MODES),
                     "description": "insert_before | insert_after | replace | delete",
                 },
                 "line": {
@@ -128,42 +129,25 @@ def _stream_line_edit(
 
 
 
-def line_edit_impl(input: Dict[str, Any]) -> str:
-    path_value = input.get("path", "").strip()
-    mode_value = (input.get("mode") or "").strip()
-
-    if not path_value or not mode_value:
-        raise ValueError("missing required parameters")
-    if mode_value not in _EDIT_MODES:
-        raise ValueError(f"unsupported mode: {mode_value}")
+def line_edit_impl(params: LineEditInput, tracker: Optional[TurnDiffTracker] = None) -> ToolOutput:
+    path_value = params.path.strip()
+    mode_value = params.mode
 
     target_path = Path(path_value)
     if not target_path.exists():
-        raise FileNotFoundError(path_value)
+        return ToolOutput(content=path_value, success=False, metadata={"error_type": "not_found"})
     if not target_path.is_file():
-        raise IsADirectoryError(path_value)
+        return ToolOutput(content=path_value, success=False, metadata={"error_type": "is_directory"})
 
-    line_number = input.get("line")
-    if line_number is not None:
-        line_number = int(line_number)
-        if line_number < 1:
-            raise ValueError("line must be >= 1")
-
-    anchor = input.get("anchor")
-    occurrence = int(input.get("occurrence") or 1)
-    line_count = int(input.get("line_count") or 1)
-    if occurrence < 1 or line_count < 1:
-        raise ValueError("occurrence and line_count must be >= 1")
-
-    text_value = input.get("text")
-    if mode_value in {"insert_before", "insert_after", "replace"} and text_value is None:
-        raise ValueError("'text' is required for insert/replace modes")
-    if mode_value == "delete" and text_value not in (None, ""):
-        raise ValueError("'text' must be omitted for delete mode")
-
-    dry_run = bool(input.get("dry_run", False))
+    line_number = params.line
+    anchor = params.anchor
+    occurrence = params.occurrence
+    line_count = params.line_count
+    text_value = params.text
+    dry_run = params.dry_run
 
     lines = _read_lines(target_path)
+    original_text = "".join(lines)
     total_lines = len(lines)
     warning = None
     if total_lines >= _LARGE_FILE_WARNING_LINES:
@@ -172,20 +156,23 @@ def line_edit_impl(input: Dict[str, Any]) -> str:
     if line_number is not None:
         if mode_value == "insert_before":
             if line_number > total_lines + 1:
-                raise ValueError("line out of range")
+                return ToolOutput(content="line out of range", success=False, metadata={"error_type": "edit_error"})
         elif mode_value == "insert_after":
             if line_number > total_lines:
-                raise ValueError("line out of range")
+                return ToolOutput(content="line out of range", success=False, metadata={"error_type": "edit_error"})
         else:
             if line_number > total_lines:
-                raise ValueError("line out of range")
+                return ToolOutput(content="line out of range", success=False, metadata={"error_type": "edit_error"})
 
-    index, byte_offset = _resolve_index(
-        lines=lines,
-        line_number=line_number,
-        anchor=anchor,
-        occurrence=occurrence,
-    )
+    try:
+        index, byte_offset = _resolve_index(
+            lines=lines,
+            line_number=line_number,
+            anchor=anchor,
+            occurrence=occurrence,
+        )
+    except Exception as exc:
+        return ToolOutput(content=str(exc), success=False, metadata={"error_type": "edit_error"})
 
     if mode_value == "insert_after":
         if index < len(lines):
@@ -193,12 +180,12 @@ def line_edit_impl(input: Dict[str, Any]) -> str:
         index += 1
 
     if mode_value in {"replace", "delete"} and index >= total_lines:
-        raise ValueError("target line outside file range")
+        return ToolOutput(content="target line outside file range", success=False, metadata={"error_type": "edit_error"})
 
     if mode_value in {"replace", "delete"}:
         end_index = index + line_count
         if end_index > total_lines:
-            raise ValueError("line_count extends past end of file")
+            return ToolOutput(content="line_count extends past end of file", success=False, metadata={"error_type": "edit_error"})
     else:
         end_index = index
 
@@ -206,7 +193,7 @@ def line_edit_impl(input: Dict[str, Any]) -> str:
     if mode_value in {"insert_before", "insert_after", "replace"}:
         insert_block = _normalize_text_block(text_value)
         if not insert_block:
-            raise ValueError("text must contain at least one line; use \"\n\" for a blank line")
+            return ToolOutput(content='text must contain at least one line; use "\\n" for a blank line', success=False, metadata={"error_type": "edit_error"})
 
     affected = line_count if mode_value in {"replace", "delete"} else len(insert_block)
 
@@ -233,22 +220,43 @@ def line_edit_impl(input: Dict[str, Any]) -> str:
 
     if dry_run:
         base_result["dry_run"] = True
-        return json.dumps(base_result)
+        return ToolOutput(content=json.dumps(base_result), success=True)
 
-    temp_path = target_path.with_suffix(target_path.suffix + '.lineedit.tmp')
-    _stream_line_edit(
-        source=target_path,
-        dest=temp_path,
-        insert_index=index,
-        end_index=end_index,
-        insert_block=insert_block,
-        mode=mode_value,
-    )
-    temp_path.replace(target_path)
+    if tracker is not None:
+        tracker.lock_file(target_path)
+    try:
+        temp_path = target_path.with_suffix(target_path.suffix + '.lineedit.tmp')
+        _stream_line_edit(
+            source=target_path,
+            dest=temp_path,
+            insert_index=index,
+            end_index=end_index,
+            insert_block=insert_block,
+            mode=mode_value,
+        )
+        temp_path.replace(target_path)
+    finally:
+        if tracker is not None:
+            tracker.unlock_file(target_path)
 
-    return json.dumps(base_result)
+    if tracker is not None:
+        try:
+            updated_text = target_path.read_text(encoding="utf-8")
+        except Exception:
+            updated_text = ""
+        line_range: Optional[tuple[int, int]] = None
+        if mode_value in {"replace", "delete"}:
+            line_range = (index + 1, end_index)
+        tracker.record_edit(
+            path=target_path,
+            tool_name="line_edit",
+            action=mode_value,
+            old_content=original_text,
+            new_content=updated_text,
+            line_range=line_range,
+        )
 
-
+    return ToolOutput(content=json.dumps(base_result), success=True)
 
 
 

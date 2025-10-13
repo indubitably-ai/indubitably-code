@@ -1,7 +1,12 @@
+from __future__ import annotations
+
+import json
 import os
 import re
-import json
-from typing import Dict, Any, List, Pattern, Optional
+from typing import Any, Dict, List, Optional, Pattern
+
+from tools.handler import ToolOutput
+from tools.schemas import GrepInput
 
 
 def grep_tool_def() -> dict:
@@ -125,36 +130,39 @@ def _count_matches(files: List[str], regex: Pattern[str]) -> Dict[str, int]:
     return counts
 
 
-def grep_impl(input: Dict[str, Any]) -> str:
-    pattern = input.get("pattern", None)
-    if not pattern:
-        raise ValueError("missing 'pattern'")
+def grep_impl(params: GrepInput) -> ToolOutput:
+    try:
+        base = params.path or "."
+        glob = params.include
+        output_mode = params.output_mode
+        before = params.before
+        after = params.after
+        around = params.around
+        ignore_case = params.case_insensitive
+        multiline = params.multiline
+        head_limit = params.head_limit
 
-    base = input.get("path") or "."
-    glob = input.get("glob")
-    output_mode = input.get("output_mode") or "content"
-    before = int(input.get("-B") or 0)
-    after = int(input.get("-A") or 0)
-    around = int(input.get("-C") or 0)
-    ignore_case = bool(input.get("-i") or False)
-    multiline = bool(input.get("multiline") or False)
-    head_limit = input.get("head_limit")
-    if head_limit is not None:
-        head_limit = int(head_limit)
-        if head_limit <= 0:
-            head_limit = None
+        regex = _compile_pattern(params.pattern, ignore_case, multiline)
+        files = _iter_files(base, glob)
 
-    regex = _compile_pattern(pattern, ignore_case, multiline)
+        import json as _json
+        if output_mode == "files_with_matches":
+            matches = _collect_files_with_matches(files, regex, head_limit)
+            return ToolOutput(content=_json.dumps({
+                "pattern": params.pattern,
+                "path": base,
+                "files": matches,
+                "total": len(matches),
+            }), success=True)
+        if output_mode == "count":
+            counts = _count_matches(files, regex)
+            return ToolOutput(content=_json.dumps({
+                "pattern": params.pattern,
+                "path": base,
+                "counts": counts,
+                "total": sum(counts.values()),
+            }), success=True)
 
-    files = _iter_files(base, glob)
-
-    if output_mode == "files_with_matches":
-        matches = _collect_files_with_matches(files, regex, head_limit)
-        return json.dumps(matches)
-    elif output_mode == "count":
-        counts = _count_matches(files, regex)
-        return json.dumps(counts)
-    else:
         lines: List[str] = []
         for path in files:
             chunk = _find_matches_in_file(path, regex, before, after, around, head_limit)
@@ -162,4 +170,11 @@ def grep_impl(input: Dict[str, Any]) -> str:
                 lines.extend(chunk)
                 if head_limit is not None and len(lines) >= head_limit:
                     break
-        return "\n".join(lines)
+        return ToolOutput(content=_json.dumps({
+            "pattern": params.pattern,
+            "path": base,
+            "matches": lines,
+            "total": len(lines),
+        }), success=True)
+    except Exception as exc:
+        return ToolOutput(content=f"Grep failed: {exc}", success=False, metadata={"error_type": "search_error"})

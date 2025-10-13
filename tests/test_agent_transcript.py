@@ -1,12 +1,12 @@
 import sys
-import types
 
 import pytest
 
 from agent import run_agent, Tool
+from tests.mocking import MockAnthropic, text_block, tool_use_block
 
 
-def test_run_agent_transcript_records(tmp_path, monkeypatch):
+def test_run_agent_transcript_records(tmp_path, anthropic_mock, stdin_stub, monkeypatch):
     transcript = tmp_path / "transcript.log"
 
     tool = Tool(
@@ -16,38 +16,23 @@ def test_run_agent_transcript_records(tmp_path, monkeypatch):
         fn=lambda payload: "ok",
     )
 
-    class DummyClient:
-        def __init__(self):
-            self.messages = self
-            self.calls = 0
+    client = anthropic_mock.patch("agent.Anthropic")
+    client.reset()
+    client.add_response_from_blocks([
+        text_block("hello"),
+        tool_use_block("echo", {}, tool_use_id="1"),
+    ])
+    client.add_response_from_blocks([text_block("done")])
 
-        def create(self, **_):
-            messages = [
-                types.SimpleNamespace(
-                    content=[
-                        types.SimpleNamespace(type="text", text="hello"),
-                        types.SimpleNamespace(type="tool_use", name="echo", input={}, id="1"),
-                    ]
-                ),
-                types.SimpleNamespace(
-                    content=[types.SimpleNamespace(type="text", text="done")]
-                ),
-            ]
-            if self.calls >= len(messages):
-                raise RuntimeError("no more responses")
-            result = messages[self.calls]
-            self.calls += 1
-            return result
+    class DummyFiglet:
+        def __init__(self, font: str = "standard") -> None:
+            self.font = font
 
-    class DummyStdin:
-        def __init__(self):
-            self._values = ["hi\n", ""]
+        def renderText(self, text: str) -> str:
+            return f"{text}\n"
 
-        def readline(self):
-            return self._values.pop(0) if self._values else ""
-
-    monkeypatch.setattr("agent.Anthropic", lambda: DummyClient())
-    monkeypatch.setattr("sys.stdin", DummyStdin())
+    monkeypatch.setattr("agent.Figlet", lambda font="standard": DummyFiglet(font))
+    stdin_stub("hi\n", "")
 
     # Suppress banner printing to keep test output quiet
     monkeypatch.setattr("builtins.print", lambda *args, **kwargs: None)
@@ -61,37 +46,13 @@ def test_run_agent_transcript_records(tmp_path, monkeypatch):
     assert "SAMUS: done" in contents
 
 
-def _run_agent_with_dummy_io(monkeypatch, *, debug_tool_use: bool, tool_fn, payload):
+def _run_agent_with_dummy_io(monkeypatch, anthropic_mock, stdin_stub, *, debug_tool_use: bool, tool_fn, payload):
     tool = Tool(
         name="echo",
         description="",
         input_schema={"type": "object"},
         fn=tool_fn,
     )
-
-    responses = [
-        types.SimpleNamespace(
-            content=[
-                types.SimpleNamespace(type="tool_use", name="echo", input=payload, id="1"),
-            ]
-        ),
-        types.SimpleNamespace(
-            content=[types.SimpleNamespace(type="text", text="done")]
-        ),
-    ]
-
-    class DummyClient:
-        def __init__(self):
-            self.messages = self
-            self._responses = list(responses)
-            self._index = 0
-
-        def create(self, **_):
-            if self._index >= len(self._responses):
-                raise RuntimeError("no more responses")
-            result = self._responses[self._index]
-            self._index += 1
-            return result
 
     class DummyFiglet:
         def __init__(self, font: str = "standard") -> None:
@@ -107,20 +68,33 @@ def _run_agent_with_dummy_io(monkeypatch, *, debug_tool_use: bool, tool_fn, payl
         def readline(self) -> str:
             return self._values.pop(0) if self._values else ""
 
-    monkeypatch.setattr("agent.Anthropic", lambda: DummyClient())
+    client = anthropic_mock.patch("agent.Anthropic")
+    client.reset()
+    client.add_response_from_blocks([
+        tool_use_block("echo", payload, tool_use_id="1"),
+    ])
+    client.add_response_from_blocks([text_block("done")])
+
     monkeypatch.setattr("agent.Figlet", lambda font="standard": DummyFiglet(font))
-    monkeypatch.setattr("sys.stdin", DummyStdin())
+    stdin_stub("hello\n", "")
 
     run_agent([tool], use_color=False, debug_tool_use=debug_tool_use)
 
 
-def test_run_agent_hides_tool_details_when_debug_disabled(monkeypatch, capsys):
+def test_run_agent_hides_tool_details_when_debug_disabled(monkeypatch, anthropic_mock, stdin_stub, capsys):
     payload = {"payload_key": "UNIQUE_PAYLOAD_VALUE"}
 
     def tool_fn(_payload):
         return "ok"
 
-    _run_agent_with_dummy_io(monkeypatch, debug_tool_use=False, tool_fn=tool_fn, payload=payload)
+    _run_agent_with_dummy_io(
+        monkeypatch,
+        anthropic_mock,
+        stdin_stub,
+        debug_tool_use=False,
+        tool_fn=tool_fn,
+        payload=payload,
+    )
     captured = capsys.readouterr()
 
     assert "⚙️  Tool ▸ echo" in captured.out
@@ -129,13 +103,20 @@ def test_run_agent_hides_tool_details_when_debug_disabled(monkeypatch, capsys):
     assert "UNIQUE_PAYLOAD_VALUE" not in captured.out
 
 
-def test_run_agent_shows_tool_details_when_debug_enabled(monkeypatch, capsys):
+def test_run_agent_shows_tool_details_when_debug_enabled(monkeypatch, anthropic_mock, stdin_stub, capsys):
     payload = {"payload_key": "UNIQUE_PAYLOAD_VALUE"}
 
     def tool_fn(_payload):
         return "ok"
 
-    _run_agent_with_dummy_io(monkeypatch, debug_tool_use=True, tool_fn=tool_fn, payload=payload)
+    _run_agent_with_dummy_io(
+        monkeypatch,
+        anthropic_mock,
+        stdin_stub,
+        debug_tool_use=True,
+        tool_fn=tool_fn,
+        payload=payload,
+    )
     captured = capsys.readouterr()
 
     assert "⚙️  Tool ▸ echo" in captured.out
@@ -144,13 +125,20 @@ def test_run_agent_shows_tool_details_when_debug_enabled(monkeypatch, capsys):
     assert "UNIQUE_PAYLOAD_VALUE" in captured.out
 
 
-def test_run_agent_shows_errors_without_debug(monkeypatch, capsys):
+def test_run_agent_shows_errors_without_debug(monkeypatch, anthropic_mock, stdin_stub, capsys):
     payload = {"payload_key": "UNIQUE_PAYLOAD_VALUE"}
 
     def tool_fn(_payload):
         raise RuntimeError("boom failure")
 
-    _run_agent_with_dummy_io(monkeypatch, debug_tool_use=False, tool_fn=tool_fn, payload=payload)
+    _run_agent_with_dummy_io(
+        monkeypatch,
+        anthropic_mock,
+        stdin_stub,
+        debug_tool_use=False,
+        tool_fn=tool_fn,
+        payload=payload,
+    )
     captured = capsys.readouterr()
 
     assert "⚙️  Tool ▸ echo" in captured.out

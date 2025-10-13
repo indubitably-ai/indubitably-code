@@ -1,7 +1,14 @@
-import os
+from __future__ import annotations
+
 import json
+import os
+
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any, Dict, Optional
+
+from tools.handler import ToolOutput
+from tools.schemas import EditFileInput
+from session.turn_diff_tracker import TurnDiffTracker
 
 
 def edit_file_tool_def() -> dict:
@@ -54,61 +61,109 @@ def _build_response(
     return json.dumps(payload)
 
 
-def _create_new_file(file_path: str, content: str, *, dry_run: bool = False) -> str:
+def _create_new_file(
+    file_path: str,
+    content: str,
+    *,
+    dry_run: bool = False,
+    tracker: Optional[TurnDiffTracker] = None,
+) -> str:
     if dry_run:
         return _build_response("create", file_path, dry_run=True)
     p = Path(file_path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(content, encoding="utf-8")
+    if tracker is not None:
+        tracker.lock_file(p)
+    try:
+        p.write_text(content, encoding="utf-8")
+    finally:
+        if tracker is not None:
+            tracker.unlock_file(p)
+
+    if tracker is not None:
+        tracker.record_edit(
+            path=p,
+            tool_name="edit_file",
+            action="create",
+            old_content=None,
+            new_content=content,
+        )
     return _build_response("create", file_path)
 
 
 
-def edit_file_impl(input: Dict[str, Any]) -> str:
-    path = input.get("path", "")
-    old = input.get("old_str", None)
-    new = input.get("new_str", None)
+def edit_file_impl(params: EditFileInput, tracker: Optional[TurnDiffTracker] = None) -> ToolOutput:
+    path = params.path
+    old = params.old_str
+    new = params.new_str
+    dry_run = params.dry_run
+    try:
+        if not os.path.exists(path):
+            if old == "":
+                msg = _create_new_file(path, new, dry_run=dry_run, tracker=tracker)
+                from json import loads
+                payload = loads(msg)
+                return ToolOutput(content=msg, success=True)
+            raise FileNotFoundError(path)
 
-    if not path or old is None or new is None or old == new:
-        raise ValueError("invalid input parameters")
+        content = Path(path).read_text(encoding="utf-8")
+        line_total = max(1, content.count("\n") + 1)
+        warning = None
+        if line_total >= _LARGE_FILE_WARNING_LINES:
+            warning = f"file has {line_total} lines; consider template_block for large edits"
 
-    dry_run = bool(input.get("dry_run", False))
-
-    if not os.path.exists(path):
         if old == "":
-            return _create_new_file(path, new, dry_run=dry_run)
-        raise FileNotFoundError(path)
+            if dry_run:
+                return ToolOutput(content=_build_response("replace", path, dry_run=True, warning=warning), success=True)
+            if tracker is not None:
+                tracker.lock_file(path)
+            try:
+                Path(path).write_text(new, encoding="utf-8")
+            finally:
+                if tracker is not None:
+                    tracker.unlock_file(path)
+            if tracker is not None:
+                tracker.record_edit(
+                    path=path,
+                    tool_name="edit_file",
+                    action="replace",
+                    old_content=content,
+                    new_content=new,
+                )
+            return ToolOutput(content=_build_response("replace", path, warning=warning), success=True)
 
-    content = Path(path).read_text(encoding="utf-8")
-    line_total = max(1, content.count("\n") + 1)
-    warning = None
-    if line_total >= _LARGE_FILE_WARNING_LINES:
-        warning = f"file has {line_total} lines; consider template_block for large edits"
+        occurrences = content.count(old)
+        if occurrences == 0:
+            return ToolOutput(content="old_str not found in file", success=False, metadata={"error_type": "edit_error"})
 
-    if old == "":
+        if occurrences > 1:
+            extra = f"multiple matches ({occurrences}); ensure this edit is intended"
+            warning = f"{warning}; {extra}" if warning else extra
+
+        new_content = content.replace(old, new)
+
         if dry_run:
-            return _build_response("replace", path, dry_run=True, warning=warning)
-        Path(path).write_text(new, encoding="utf-8")
-        return _build_response("replace", path, warning=warning)
+            return ToolOutput(content=_build_response("replace", path, dry_run=True, replacements=occurrences, warning=warning), success=True)
 
-    occurrences = content.count(old)
-    if occurrences == 0:
-        raise ValueError("old_str not found in file")
+        if tracker is not None:
+            tracker.lock_file(path)
+        try:
+            Path(path).write_text(new_content, encoding="utf-8")
+        finally:
+            if tracker is not None:
+                tracker.unlock_file(path)
 
-    if occurrences > 1:
-        extra = f"multiple matches ({occurrences}); ensure this edit is intended"
-        warning = f"{warning}; {extra}" if warning else extra
+        if tracker is not None:
+            tracker.record_edit(
+                path=path,
+                tool_name="edit_file",
+                action="replace",
+                old_content=content,
+                new_content=new_content,
+            )
 
-    new_content = content.replace(old, new)
-
-    if dry_run:
-        return _build_response(
-            "replace",
-            path,
-            dry_run=True,
-            replacements=occurrences,
-            warning=warning,
-        )
-
-    Path(path).write_text(new_content, encoding="utf-8")
-    return _build_response("replace", path, replacements=occurrences, warning=warning)
+        return ToolOutput(content=_build_response("replace", path, replacements=occurrences, warning=warning), success=True)
+    except FileNotFoundError as exc:
+        return ToolOutput(content=f"File not found: {exc}", success=False, metadata={"error_type": "not_found"})
+    except Exception as exc:
+        return ToolOutput(content=f"Edit failed: {exc}", success=False, metadata={"error_type": "edit_error"})

@@ -5,7 +5,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from agent_runner import AgentRunOptions, AgentRunResult, AgentRunner
 from runner_config import RunnerConfig, load_runner_config
@@ -86,6 +86,11 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         type=Path,
         help="When tool debugging is enabled, append JSONL records of tool invocations to this path",
     )
+    parser.add_argument(
+        "--undo-last-turn",
+        action="store_true",
+        help="Undo the most recent turn after execution to revert filesystem changes",
+    )
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON summary")
     parser.add_argument("--verbose", action="store_true", help="Print detailed progress information")
 
@@ -133,11 +138,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"Running headless agent with {len(runner.active_tools)} tools...", file=sys.stderr)
 
     result = runner.run(prompt)
+    undo_operations: Optional[List[str]] = None
+    if args.undo_last_turn:
+        undo_operations = runner.undo_last_turn()
 
     if args.json:
-        print(_result_to_json(result))
+        print(_result_to_json(result, undo_operations))
     else:
-        _print_human_summary(result)
+        _print_human_summary(result, undo_operations)
 
     if args.verbose:
         print(f"Stopped after {result.turns_used} turns: {result.stopped_reason}", file=sys.stderr)
@@ -175,22 +183,43 @@ def _load_runner_config(config_path: Optional[Path]) -> RunnerConfig:
         raise SystemExit(f"Failed to load config {config_path}: {exc}")
 
 
-def _result_to_json(result: AgentRunResult) -> str:
+def _result_to_json(result: AgentRunResult, undo_operations: Optional[List[str]] = None) -> str:
+    fatal_event = next(
+        (event for event in result.tool_events if event.metadata.get("error_type") == "fatal"),
+        None,
+    )
+
     payload: Dict[str, Any] = {
         "final_response": result.final_response,
         "stopped_reason": result.stopped_reason,
         "turns_used": result.turns_used,
         "edited_files": result.edited_files,
         "tools": [event.to_dict() for event in result.tool_events],
+        "turn_summaries": result.turn_summaries,
     }
+    if undo_operations is not None:
+        payload["undo_operations"] = undo_operations
+    if fatal_event is not None:
+        payload["fatal_event"] = fatal_event.to_dict()
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
-def _print_human_summary(result: AgentRunResult) -> None:
+def _print_human_summary(result: AgentRunResult, undo_operations: Optional[List[str]] = None) -> None:
     final = result.final_response or "<no final response>"
     print(final)
     print("\n---")
     print(f"Stopped reason: {result.stopped_reason} (turns: {result.turns_used})")
+
+    if result.stopped_reason == "fatal_tool_error":
+        fatal_event = next(
+            (event for event in result.tool_events if event.metadata.get("error_type") == "fatal"),
+            None,
+        )
+        if fatal_event is not None:
+            print(
+                f"Fatal tool error: {fatal_event.tool_name} → {fatal_event.result}",
+                file=sys.stderr,
+            )
 
     if result.tool_events:
         print("Tools executed:")
@@ -199,7 +228,9 @@ def _print_human_summary(result: AgentRunResult) -> None:
             if event.skipped:
                 status = "skipped"
             paths = f" paths={event.paths}" if event.paths else ""
-            print(f"  - turn {event.turn}: {event.tool_name} [{status}]{paths}")
+            error_type = event.metadata.get("error_type") if event.metadata else None
+            error_suffix = f" error_type={error_type}" if error_type else ""
+            print(f"  - turn {event.turn}: {event.tool_name} [{status}]{paths}{error_suffix}")
     else:
         print("Tools executed: none")
 
@@ -209,6 +240,22 @@ def _print_human_summary(result: AgentRunResult) -> None:
             print(f"  - {path}")
     else:
         print("Edited files: none")
+
+    if result.turn_summaries:
+        print("Turn change summaries:")
+        for summary in result.turn_summaries:
+            turn = summary.get("turn")
+            print(f"  - turn {turn}: {summary.get('summary')}")
+            conflicts = summary.get("conflicts")
+            if conflicts:
+                print("    conflicts:")
+                for conflict in conflicts:
+                    print(f"      * {conflict}")
+
+    if undo_operations:
+        print("Undo operations:")
+        for op in undo_operations:
+            print(f"  - {op}")
 
 
 if __name__ == "__main__":

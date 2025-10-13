@@ -1,6 +1,11 @@
-from typing import Dict, Any, Optional
-from collections import deque
+from __future__ import annotations
+
 import os
+from collections import deque
+from typing import Any, Dict, Optional
+
+from tools.handler import ToolOutput
+from tools.schemas import ReadFileInput
 
 
 def read_file_tool_def() -> dict:
@@ -102,41 +107,43 @@ def _read_tail_lines(path: str, tail_lines: int, encoding: str, errors: str) -> 
     return "\n".join(dq)
 
 
-def read_file_impl(input: Dict[str, Any]) -> str:
-    path = input.get("path", "")
-    if not path:
-        raise ValueError("missing 'path'")
+def read_file_impl(params: ReadFileInput) -> ToolOutput:
+    path = params.path
+    try:
+        if not os.path.exists(path):
+            raise FileNotFoundError(path)
+        if os.path.isdir(path):
+            raise IsADirectoryError(path)
 
-    if not os.path.exists(path):
-        raise FileNotFoundError(path)
-    if os.path.isdir(path):
-        raise IsADirectoryError(path)
+        encoding = params.encoding or "utf-8"
+        errors = params.errors or "replace"
 
-    encoding = (input.get("encoding") or "utf-8").strip() or "utf-8"
-    errors = (input.get("errors") or "replace").strip() or "replace"
+        if params.byte_offset is not None or params.byte_limit is not None:
+            bo = params.byte_offset or 0
+            bl = params.byte_limit
+            content = _read_bytes_range(path, bo, bl, encoding, errors)
+        elif params.tail_lines is not None:
+            content = _read_tail_lines(path, params.tail_lines, encoding, errors)
+        elif params.offset is not None or params.limit is not None:
+            start = params.offset or 1
+            lim = params.limit
+            content = _read_lines_range(path, start, lim, encoding, errors)
+        else:
+            content = _read_full_text(path, encoding, errors)
 
-    # Byte range takes precedence if provided
-    byte_offset = input.get("byte_offset")
-    byte_limit = input.get("byte_limit")
-    if byte_offset is not None or byte_limit is not None:
-        bo = int(byte_offset or 0)
-        bl = int(byte_limit) if byte_limit is not None else None
-        return _read_bytes_range(path, bo, bl, encoding, errors)
-
-    # Tail lines next
-    tail_lines = input.get("tail_lines")
-    if tail_lines is not None:
-        return _read_tail_lines(path, int(tail_lines), encoding, errors)
-
-    # Line range
-    offset = input.get("offset")
-    limit = input.get("limit")
-    if offset is not None or limit is not None:
-        start = int(offset or 1)
-        lim = int(limit) if limit is not None else None
-        return _read_lines_range(path, start, lim, encoding, errors)
-
-    # Full file
-    return _read_full_text(path, encoding, errors)
-
+        import json as _json
+        return ToolOutput(
+            content=_json.dumps({
+                "content": content,
+                "path": path,
+                "encoding": encoding,
+            }),
+            success=True,
+        )
+    except FileNotFoundError as exc:
+        return ToolOutput(content=f"File not found: {exc}", success=False, metadata={"error_type": "not_found"})
+    except IsADirectoryError as exc:
+        return ToolOutput(content=f"Path is a directory: {exc}", success=False, metadata={"error_type": "is_directory"})
+    except Exception as exc:
+        return ToolOutput(content=f"Read failed: {exc}", success=False, metadata={"error_type": "io_error"})
 
