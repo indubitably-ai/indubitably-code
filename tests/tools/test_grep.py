@@ -28,7 +28,7 @@ def _harness(tmp_path: Path) -> Tuple[ToolTestHarness, Path]:
     return ToolTestHarness(handler, context=context), base
 
 
-def _invoke(harness: ToolTestHarness, payload: dict[str, object]) -> dict[str, object] | list[str]:
+def _invoke(harness: ToolTestHarness, payload: dict[str, object]) -> dict[str, object]:
     output = asyncio.run(harness.invoke("grep", payload))
     return json.loads(output.content)
 
@@ -50,7 +50,7 @@ def test_grep_content_mode(repo: Tuple[ToolTestHarness, Path]):
             "path": str(base / "src"),
         },
     )
-    assert any("a.py" in line for line in output)
+    assert any("a.py" in line for line in output["matches"])
 
 
 def test_grep_files_mode(repo: Tuple[ToolTestHarness, Path]):
@@ -63,7 +63,7 @@ def test_grep_files_mode(repo: Tuple[ToolTestHarness, Path]):
             "output_mode": "files_with_matches",
         },
     )
-    assert str(base / "src" / "b.py") in output
+    assert str(base / "src" / "b.py") in output["files"]
 
 
 def test_grep_count_mode(repo: Tuple[ToolTestHarness, Path]):
@@ -76,7 +76,7 @@ def test_grep_count_mode(repo: Tuple[ToolTestHarness, Path]):
             "output_mode": "count",
         },
     )
-    assert output[str(base / "src" / "a.py")] == 1
+    assert output["counts"][str(base / "src" / "a.py")] == 1
 
 
 def test_grep_missing_pattern(repo: Tuple[ToolTestHarness, Path]):

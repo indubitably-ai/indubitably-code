@@ -1,11 +1,13 @@
 import json
 import pytest
-
+from tools.handler import ToolOutput
+from tools.schemas import CreateFileInput
 from tools_create_file import create_file_impl
 
 
 def _call(payload):
-    return json.loads(create_file_impl(payload))
+    out: ToolOutput = create_file_impl(CreateFileInput(**payload))
+    return json.loads(out.content)
 
 
 def test_create_new_file(tmp_path, monkeypatch):
@@ -60,12 +62,13 @@ def test_missing_parent_without_create(tmp_path, monkeypatch):
     base.mkdir()
     monkeypatch.chdir(base)
 
-    with pytest.raises(FileNotFoundError):
-        create_file_impl({
-            "path": "missing/dir/file.txt",
-            "content": "data",
-            "create_parents": False,
-        })
+    out = create_file_impl(CreateFileInput(**{
+        "path": "missing/dir/file.txt",
+        "content": "data",
+        "create_parents": False,
+    }))
+    assert out.success is False
+    assert "parent directory missing" in out.content
 
 
 def test_error_on_existing_when_policy_error(tmp_path, monkeypatch):
@@ -75,8 +78,9 @@ def test_error_on_existing_when_policy_error(tmp_path, monkeypatch):
 
     (base / "file.txt").write_text("data", encoding="utf-8")
 
-    with pytest.raises(FileExistsError):
-        create_file_impl({"path": "file.txt"})
+    out = create_file_impl(CreateFileInput(path="file.txt"))
+    assert out.success is False
+    assert out.metadata and out.metadata.get("error_type") == "exists"
 
 
 def test_error_on_directory_path(tmp_path, monkeypatch):
@@ -87,6 +91,6 @@ def test_error_on_directory_path(tmp_path, monkeypatch):
     (base / "dir").mkdir()
 
     with pytest.raises(IsADirectoryError):
-        create_file_impl({"path": "dir"})
+        create_file_impl(CreateFileInput(path="dir"))
 
 

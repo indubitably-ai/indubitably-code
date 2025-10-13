@@ -2,6 +2,7 @@ import json
 from difflib import unified_diff
 
 from tools_apply_patch import apply_patch_impl
+from tools.schemas import ApplyPatchInput
 
 
 def test_apply_patch_add_update_delete(tmp_path, monkeypatch):
@@ -14,7 +15,7 @@ def test_apply_patch_add_update_delete(tmp_path, monkeypatch):
 Hello
 World
 """
-    add_result = json.loads(apply_patch_impl({"file_path": "notes.txt", "patch": add_patch}))
+    add_result = json.loads(apply_patch_impl(ApplyPatchInput(file_path="notes.txt", patch=add_patch)).content)
     assert add_result["ok"] is True
     assert (base / "notes.txt").read_text(encoding="utf-8") == "Hello\nWorld\n"
 
@@ -22,13 +23,13 @@ World
 - Hello
 + Goodbye
 """
-    update_result = json.loads(apply_patch_impl({"file_path": "notes.txt", "patch": update_patch}))
+    update_result = json.loads(apply_patch_impl(ApplyPatchInput(file_path="notes.txt", patch=update_patch)).content)
     assert update_result["ok"] is True
     assert (base / "notes.txt").read_text(encoding="utf-8") == "Goodbye\nWorld\n"
 
     delete_patch = """*** Delete File: notes.txt
 """
-    delete_result = json.loads(apply_patch_impl({"file_path": "notes.txt", "patch": delete_patch}))
+    delete_result = json.loads(apply_patch_impl(ApplyPatchInput(file_path="notes.txt", patch=delete_patch)).content)
     assert delete_result["ok"] is True
     assert not (base / "notes.txt").exists()
 
@@ -53,7 +54,7 @@ def test_apply_patch_handles_unified_diff_multi_hunks(tmp_path, monkeypatch):
     )
     patch = f"*** Update File: sample.txt\n{diff_body}"
 
-    result = json.loads(apply_patch_impl({"file_path": "sample.txt", "patch": patch}))
+    result = json.loads(apply_patch_impl(ApplyPatchInput(file_path="sample.txt", patch=patch)).content)
     assert result == {"ok": True, "action": "Update", "path": "sample.txt"}
     assert (base / "sample.txt").read_text(encoding="utf-8") == updated
 
@@ -78,7 +79,7 @@ def test_apply_patch_supports_insert_only_hunk(tmp_path, monkeypatch):
     )
     patch = f"*** Update File: doc.txt\n{diff_body}"
 
-    result = json.loads(apply_patch_impl({"file_path": "doc.txt", "patch": patch}))
+    result = json.loads(apply_patch_impl(ApplyPatchInput(file_path="doc.txt", patch=patch)).content)
     assert result == {"ok": True, "action": "Update", "path": "doc.txt"}
     assert (base / "doc.txt").read_text(encoding="utf-8") == updated
 
@@ -98,7 +99,7 @@ def test_apply_patch_unified_delete(tmp_path, monkeypatch):
 -line2
 """
 
-    result = json.loads(apply_patch_impl({"file_path": "old.txt", "patch": delete_patch}))
+    result = json.loads(apply_patch_impl(ApplyPatchInput(file_path="old.txt", patch=delete_patch)).content)
     assert result["ok"] is True
     assert not (base / "old.txt").exists()
 
@@ -115,7 +116,7 @@ def test_apply_patch_dry_run(tmp_path, monkeypatch):
 + bar
 """
 
-    result = json.loads(apply_patch_impl({"file_path": "file.txt", "patch": patch, "dry_run": True}))
+    result = json.loads(apply_patch_impl(ApplyPatchInput(file_path="file.txt", patch=patch, dry_run=True)).content)
     assert result == {
         "ok": True,
         "action": "Update",
@@ -148,7 +149,7 @@ def test_apply_patch_conflict_detection(tmp_path, monkeypatch):
     # Modify file to introduce conflict before applying patch
     (base / "conflict.txt").write_text("alpha\nBETA\n", encoding="utf-8")
 
-    result = json.loads(apply_patch_impl({"file_path": "conflict.txt", "patch": patch}))
+    result = json.loads(apply_patch_impl(ApplyPatchInput(file_path="conflict.txt", patch=patch)).content)
     assert result["ok"] is False
     assert result["action"] == "Update"
     assert result["path"] == "conflict.txt"
@@ -168,7 +169,7 @@ literal 0
 Hc$@)s00001
 """
 
-    result = json.loads(apply_patch_impl({"file_path": "bin.dat", "patch": binary_patch}))
+    result = json.loads(apply_patch_impl(ApplyPatchInput(file_path="bin.dat", patch=binary_patch)).content)
     assert result == {
         "ok": False,
         "action": "Update",
@@ -192,7 +193,7 @@ def test_apply_patch_rejects_header_mismatch(tmp_path, monkeypatch):
 +y
 """
 
-    result = json.loads(apply_patch_impl({"file_path": "a.txt", "patch": patch}))
+    result = json.loads(apply_patch_impl(ApplyPatchInput(file_path="a.txt", patch=patch)).content)
     assert result["ok"] is False
     assert result["action"] == "Update"
     assert result["path"] == "a.txt"
@@ -215,7 +216,7 @@ def test_apply_patch_rejects_unified_path_mismatch(tmp_path, monkeypatch):
 +line
 """
 
-    result = json.loads(apply_patch_impl({"file_path": "a.txt", "patch": patch}))
+    result = json.loads(apply_patch_impl(ApplyPatchInput(file_path="a.txt", patch=patch)).content)
     assert result["ok"] is False
     assert result["action"] == "Update"
     assert result["path"] == "a.txt"

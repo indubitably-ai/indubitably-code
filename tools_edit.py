@@ -6,8 +6,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from pydantic import ValidationError
-
+from tools.handler import ToolOutput
 from tools.schemas import EditFileInput
 from session.turn_diff_tracker import TurnDiffTracker
 
@@ -93,86 +92,78 @@ def _create_new_file(
 
 
 
-def edit_file_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] = None) -> str:
-    try:
-        params = EditFileInput(**input)
-    except ValidationError as exc:
-        messages = []
-        for err in exc.errors():
-            loc = ".".join(str(part) for part in err.get("loc", ())) or "input"
-            messages.append(f"{loc}: {err.get('msg', 'invalid value')}")
-        raise ValueError("; ".join(messages)) from exc
-
+def edit_file_impl(params: EditFileInput, tracker: Optional[TurnDiffTracker] = None) -> ToolOutput:
     path = params.path
     old = params.old_str
     new = params.new_str
     dry_run = params.dry_run
+    try:
+        if not os.path.exists(path):
+            if old == "":
+                msg = _create_new_file(path, new, dry_run=dry_run, tracker=tracker)
+                from json import loads
+                payload = loads(msg)
+                return ToolOutput(content=msg, success=True)
+            raise FileNotFoundError(path)
 
-    if not os.path.exists(path):
+        content = Path(path).read_text(encoding="utf-8")
+        line_total = max(1, content.count("\n") + 1)
+        warning = None
+        if line_total >= _LARGE_FILE_WARNING_LINES:
+            warning = f"file has {line_total} lines; consider template_block for large edits"
+
         if old == "":
-            return _create_new_file(path, new, dry_run=dry_run, tracker=tracker)
-        raise FileNotFoundError(path)
+            if dry_run:
+                return ToolOutput(content=_build_response("replace", path, dry_run=True, warning=warning), success=True)
+            if tracker is not None:
+                tracker.lock_file(path)
+            try:
+                Path(path).write_text(new, encoding="utf-8")
+            finally:
+                if tracker is not None:
+                    tracker.unlock_file(path)
+            if tracker is not None:
+                tracker.record_edit(
+                    path=path,
+                    tool_name="edit_file",
+                    action="replace",
+                    old_content=content,
+                    new_content=new,
+                )
+            return ToolOutput(content=_build_response("replace", path, warning=warning), success=True)
 
-    content = Path(path).read_text(encoding="utf-8")
-    line_total = max(1, content.count("\n") + 1)
-    warning = None
-    if line_total >= _LARGE_FILE_WARNING_LINES:
-        warning = f"file has {line_total} lines; consider template_block for large edits"
+        occurrences = content.count(old)
+        if occurrences == 0:
+            return ToolOutput(content="old_str not found in file", success=False, metadata={"error_type": "edit_error"})
 
-    if old == "":
+        if occurrences > 1:
+            extra = f"multiple matches ({occurrences}); ensure this edit is intended"
+            warning = f"{warning}; {extra}" if warning else extra
+
+        new_content = content.replace(old, new)
+
         if dry_run:
-            return _build_response("replace", path, dry_run=True, warning=warning)
+            return ToolOutput(content=_build_response("replace", path, dry_run=True, replacements=occurrences, warning=warning), success=True)
+
         if tracker is not None:
             tracker.lock_file(path)
         try:
-            Path(path).write_text(new, encoding="utf-8")
+            Path(path).write_text(new_content, encoding="utf-8")
         finally:
             if tracker is not None:
                 tracker.unlock_file(path)
+
         if tracker is not None:
             tracker.record_edit(
                 path=path,
                 tool_name="edit_file",
                 action="replace",
                 old_content=content,
-                new_content=new,
+                new_content=new_content,
             )
-        return _build_response("replace", path, warning=warning)
 
-    occurrences = content.count(old)
-    if occurrences == 0:
-        raise ValueError("old_str not found in file")
-
-    if occurrences > 1:
-        extra = f"multiple matches ({occurrences}); ensure this edit is intended"
-        warning = f"{warning}; {extra}" if warning else extra
-
-    new_content = content.replace(old, new)
-
-    if dry_run:
-        return _build_response(
-            "replace",
-            path,
-            dry_run=True,
-            replacements=occurrences,
-            warning=warning,
-        )
-
-    if tracker is not None:
-        tracker.lock_file(path)
-    try:
-        Path(path).write_text(new_content, encoding="utf-8")
-    finally:
-        if tracker is not None:
-            tracker.unlock_file(path)
-
-    if tracker is not None:
-        tracker.record_edit(
-            path=path,
-            tool_name="edit_file",
-            action="replace",
-            old_content=content,
-            new_content=new_content,
-        )
-
-    return _build_response("replace", path, replacements=occurrences, warning=warning)
+        return ToolOutput(content=_build_response("replace", path, replacements=occurrences, warning=warning), success=True)
+    except FileNotFoundError as exc:
+        return ToolOutput(content=f"File not found: {exc}", success=False, metadata={"error_type": "not_found"})
+    except Exception as exc:
+        return ToolOutput(content=f"Edit failed: {exc}", success=False, metadata={"error_type": "edit_error"})

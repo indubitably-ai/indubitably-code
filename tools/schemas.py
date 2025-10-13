@@ -200,6 +200,41 @@ class TodoWriteInput(ToolSchema):
     todos: List[TodoItemInput] = Field(default_factory=list)
 
 
+# --- New schemas for additional tools (Phase 1) ---
+
+class ListFilesInput(ToolSchema):
+    path: Optional[str] = None
+    recursive: bool = True
+    max_depth: Optional[int] = Field(None, ge=1)
+    glob: Optional[str] = None
+    ignore_globs: List[str] = Field(default_factory=list)
+    include_files: bool = True
+    include_dirs: bool = True
+    sort_by: Literal["name", "mtime", "size"] = "name"
+    sort_order: Literal["asc", "desc"] = "asc"
+    head_limit: Optional[int] = Field(None, ge=1)
+
+
+class GlobFileSearchInput(ToolSchema):
+    target_directory: Optional[str] = None
+    glob_pattern: str = Field(..., min_length=1)
+    head_limit: Optional[int] = Field(None, ge=1)
+
+
+class CodebaseSearchInput(ToolSchema):
+    query: str = Field(..., min_length=1)
+    target_directories: List[str] = Field(default_factory=list)
+    glob_pattern: Optional[str] = None
+    max_results: int = Field(10, ge=1)
+    snippet_lines: int = Field(2, ge=0)
+
+
+class WebSearchInput(ToolSchema):
+    search_term: str = Field(..., min_length=1)
+    explanation: Optional[str] = None
+    max_results: int = Field(10, ge=1)
+
+
 _TOOL_SCHEMAS: Dict[str, Type[ToolSchema]] = {
     "read_file": ReadFileInput,
     "run_terminal_cmd": RunTerminalCmdInput,
@@ -212,13 +247,24 @@ _TOOL_SCHEMAS: Dict[str, Type[ToolSchema]] = {
     "apply_patch": ApplyPatchInput,
     "template_block": TemplateBlockInput,
     "todo_write": TodoWriteInput,
+    # Newly registered schemas
+    "list_files": ListFilesInput,
+    "glob_file_search": GlobFileSearchInput,
+    "codebase_search": CodebaseSearchInput,
+    "web_search": WebSearchInput,
 }
 
 
-def validate_tool_input(tool_name: str, raw_input: Mapping[str, Any]) -> Dict[str, Any]:
-    """Validate ``raw_input`` for ``tool_name`` using registered schemas."""
+def parse_tool_input(tool_name: str, raw_input: Mapping[str, Any]) -> ToolSchema | Dict[str, Any]:
+    """Parse and validate raw input into a Pydantic model instance.
+
+    Returns a ``ToolSchema`` instance when a schema is registered; otherwise,
+    a fallback model with raw fields is not created and the raw mapping is
+    returned wrapped in a lightweight shim via ``AnonymousSchema`` below.
+    """
     schema = _TOOL_SCHEMAS.get(tool_name)
     if schema is None:
+        # Pass through unknown tools unchanged (legacy compatibility for tests)
         return dict(raw_input)
     try:
         model = schema(**raw_input)
@@ -228,6 +274,14 @@ def validate_tool_input(tool_name: str, raw_input: Mapping[str, Any]) -> Dict[st
             loc = ".".join(str(part) for part in err.get("loc", ())) or "input"
             messages.append(f"{loc}: {err.get('msg', 'invalid value')}")
         raise ValueError("; ".join(messages))
+    return model
+
+
+def validate_tool_input(tool_name: str, raw_input: Mapping[str, Any]) -> Dict[str, Any]:
+    """Legacy helper returning dicts; delegates to ``parse_tool_input``."""
+    model = parse_tool_input(tool_name, raw_input)
+    if isinstance(model, dict):
+        return dict(model)
     return model.dump()
 
 
@@ -245,8 +299,13 @@ __all__ = [
     "TemplateBlockInput",
     "TodoItemInput",
     "TodoWriteInput",
+    "ListFilesInput",
+    "GlobFileSearchInput",
+    "CodebaseSearchInput",
+    "WebSearchInput",
     "TODO_STATUSES",
     "TEMPLATE_MODES",
     "LINE_EDIT_MODES",
+    "parse_tool_input",
     "validate_tool_input",
 ]

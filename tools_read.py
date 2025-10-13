@@ -4,8 +4,7 @@ import os
 from collections import deque
 from typing import Any, Dict, Optional
 
-from pydantic import ValidationError
-
+from tools.handler import ToolOutput
 from tools.schemas import ReadFileInput
 
 
@@ -108,38 +107,43 @@ def _read_tail_lines(path: str, tail_lines: int, encoding: str, errors: str) -> 
     return "\n".join(dq)
 
 
-def read_file_impl(input: Dict[str, Any]) -> str:
-    try:
-        params = ReadFileInput(**input)
-    except ValidationError as exc:
-        # Match legacy behaviour by surfacing ValueError with readable message
-        messages = []
-        for err in exc.errors():
-            loc = ".".join(str(item) for item in err.get("loc", ())) or "input"
-            messages.append(f"{loc}: {err.get('msg', 'invalid value')}")
-        raise ValueError("; ".join(messages)) from exc
-
+def read_file_impl(params: ReadFileInput) -> ToolOutput:
     path = params.path
-    if not os.path.exists(path):
-        raise FileNotFoundError(path)
-    if os.path.isdir(path):
-        raise IsADirectoryError(path)
+    try:
+        if not os.path.exists(path):
+            raise FileNotFoundError(path)
+        if os.path.isdir(path):
+            raise IsADirectoryError(path)
 
-    encoding = params.encoding or "utf-8"
-    errors = params.errors or "replace"
+        encoding = params.encoding or "utf-8"
+        errors = params.errors or "replace"
 
-    if params.byte_offset is not None or params.byte_limit is not None:
-        bo = params.byte_offset or 0
-        bl = params.byte_limit
-        return _read_bytes_range(path, bo, bl, encoding, errors)
+        if params.byte_offset is not None or params.byte_limit is not None:
+            bo = params.byte_offset or 0
+            bl = params.byte_limit
+            content = _read_bytes_range(path, bo, bl, encoding, errors)
+        elif params.tail_lines is not None:
+            content = _read_tail_lines(path, params.tail_lines, encoding, errors)
+        elif params.offset is not None or params.limit is not None:
+            start = params.offset or 1
+            lim = params.limit
+            content = _read_lines_range(path, start, lim, encoding, errors)
+        else:
+            content = _read_full_text(path, encoding, errors)
 
-    if params.tail_lines is not None:
-        return _read_tail_lines(path, params.tail_lines, encoding, errors)
-
-    if params.offset is not None or params.limit is not None:
-        start = params.offset or 1
-        lim = params.limit
-        return _read_lines_range(path, start, lim, encoding, errors)
-
-    return _read_full_text(path, encoding, errors)
+        import json as _json
+        return ToolOutput(
+            content=_json.dumps({
+                "content": content,
+                "path": path,
+                "encoding": encoding,
+            }),
+            success=True,
+        )
+    except FileNotFoundError as exc:
+        return ToolOutput(content=f"File not found: {exc}", success=False, metadata={"error_type": "not_found"})
+    except IsADirectoryError as exc:
+        return ToolOutput(content=f"Path is a directory: {exc}", success=False, metadata={"error_type": "is_directory"})
+    except Exception as exc:
+        return ToolOutput(content=f"Read failed: {exc}", success=False, metadata={"error_type": "io_error"})
 

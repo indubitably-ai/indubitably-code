@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from pydantic import ValidationError
 
+from tools.handler import ToolOutput
 from tools.schemas import TEMPLATE_MODES, TemplateBlockInput
 from session.turn_diff_tracker import TurnDiffTracker
 
@@ -110,16 +111,7 @@ def _locate_anchor(lines: List[str], anchor: str, occurrence: int) -> tuple[int,
     return matches[occurrence - 1]
 
 
-def _load_command(payload: Dict[str, Any]) -> TemplateCommand:
-    try:
-        params = TemplateBlockInput(**payload)
-    except ValidationError as exc:
-        messages = []
-        for err in exc.errors():
-            loc = ".".join(str(part) for part in err.get("loc", ())) or "input"
-            messages.append(f"{loc}: {err.get('msg', 'invalid value')}")
-        raise ValueError("; ".join(messages)) from exc
-
+def _command_from_model(params: TemplateBlockInput) -> TemplateCommand:
     return TemplateCommand(
         path=Path(params.path.strip()),
         mode=params.mode,
@@ -151,15 +143,18 @@ def _stream_apply_template(
 
 
 
-def template_block_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] = None) -> str:
-    command = _load_command(input)
+def template_block_impl(params: TemplateBlockInput, tracker: Optional[TurnDiffTracker] = None) -> ToolOutput:
+    try:
+        command = _command_from_model(params)
+    except Exception as exc:
+        return ToolOutput(content=str(exc), success=False, metadata={"error_type": "validation"})
 
     if not command.path.exists():
-        raise FileNotFoundError(str(command.path))
+        return ToolOutput(content=str(command.path), success=False, metadata={"error_type": "not_found"})
     if not command.path.is_file():
-        raise IsADirectoryError(str(command.path))
+        return ToolOutput(content=str(command.path), success=False, metadata={"error_type": "is_directory"})
 
-    lines = command.path.read_text(encoding="utf-8").splitlines(keepends=True)
+    lines = command.path.read_text(encoding='utf-8').splitlines(keepends=True)
     original_text = "".join(lines)
     total_lines = len(lines)
     warning = None
@@ -169,13 +164,13 @@ def template_block_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker
     try:
         anchor_index, byte_offset = _locate_anchor(lines, command.anchor, command.occurrence)
     except ValueError as exc:
-        return json.dumps({
+        return ToolOutput(content=json.dumps({
             "ok": False,
             "action": command.mode,
             "path": str(command.path),
             "error": str(exc),
             "total_lines": total_lines,
-        })
+        }), success=False, metadata={"error_type": "anchor_not_found"})
 
     anchor_lines = command.anchor.splitlines()
     insert_index = anchor_index
@@ -189,16 +184,21 @@ def template_block_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker
     if command.mode == _MODE_REPLACE:
         expected = command.expected_block
         if expected is None:
-            raise ValueError("expected_block is required for replace_block mode")
+            return ToolOutput(content=json.dumps({
+                "ok": False,
+                "action": command.mode,
+                "path": str(command.path),
+                "error": "expected_block is required for replace_block mode",
+            }), success=False, metadata={"error_type": "validation"})
         expected_lines = _normalize_lines(expected)
         segment = lines[insert_index: insert_index + len(expected_lines)]
         if [ln.rstrip("\n") for ln in segment] != [ln.rstrip("\n") for ln in expected_lines]:
-            return json.dumps({
+            return ToolOutput(content=json.dumps({
                 "ok": False,
                 "action": command.mode,
                 "path": str(command.path),
                 "error": "existing block does not match expected_block",
-            })
+            }), success=False, metadata={"error_type": "mismatch"})
         replace_count = len(expected_lines)
         offset_end = offset_start + sum(len(lines[insert_index + i]) for i in range(replace_count))
     else:
@@ -221,7 +221,7 @@ def template_block_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker
 
     if command.dry_run:
         response["dry_run"] = True
-        return json.dumps(response)
+        return ToolOutput(content=json.dumps(response), success=True)
 
     if tracker is not None:
         tracker.lock_file(command.path)
@@ -237,7 +237,7 @@ def template_block_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker
         temp_path.replace(command.path)
         if tracker is not None:
             try:
-                updated_text = command.path.read_text(encoding="utf-8")
+                updated_text = command.path.read_text(encoding='utf-8')
             except Exception:
                 updated_text = original_text
             line_range = (insert_index + 1, insert_index + max(1, len(template_lines)))
@@ -253,5 +253,4 @@ def template_block_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker
         if tracker is not None:
             tracker.unlock_file(command.path)
     response["lines_changed"] = len(template_lines)
-    return json.dumps(response)
-    return json.dumps(response)
+    return ToolOutput(content=json.dumps(response), success=True)

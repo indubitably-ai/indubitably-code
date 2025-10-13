@@ -4,6 +4,7 @@ from pathlib import Path
 
 from agent import Tool
 from tools.handlers.function import FunctionToolHandler
+from tools.schemas import DeleteFileInput
 from tools_delete_file import delete_file_impl
 from session.turn_diff_tracker import TurnDiffTracker
 from tests.tool_harness import MockToolContext, ToolTestHarness
@@ -62,7 +63,7 @@ def test_delete_file_records_tracker(tmp_path: Path) -> None:
     path.write_text("data", encoding="utf-8")
     tracker = TurnDiffTracker(turn_id=2)
 
-    delete_file_impl({"path": str(path)}, tracker=tracker)
+    delete_file_impl(DeleteFileInput(path=str(path)), tracker=tracker)
 
     edits = tracker.get_edits_for_path(path)
     assert len(edits) == 1

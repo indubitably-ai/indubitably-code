@@ -103,8 +103,8 @@ def test_runner_grep_reports_matches(integration_workspace) -> None:
 
     assert result.tool_events
     match_event = result.tool_events[0]
-    matches = json.loads(match_event.result)
-    assert any("plan.txt" in line for line in matches)
+    matches_obj = json.loads(match_event.result)
+    assert any("plan.txt" in line for line in matches_obj.get("matches", []))
 
 
 def test_glob_file_search_finds_matching_files(integration_workspace) -> None:

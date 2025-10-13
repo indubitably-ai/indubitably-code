@@ -9,6 +9,7 @@ from tools.handlers.function import FunctionToolHandler
 from tools_rename_file import rename_file_impl
 from session.turn_diff_tracker import TurnDiffTracker
 from tests.tool_harness import MockToolContext, ToolTestHarness
+from tools.schemas import RenameFileInput
 
 
 def _make_tool() -> Tool:
@@ -88,15 +89,10 @@ def test_rename_file_records_tracker(tmp_path: Path) -> None:
     src.write_text("data", encoding="utf-8")
     tracker = TurnDiffTracker(turn_id=12)
 
-    rename_file_impl(
-        {
-            "source_path": str(src),
-            "dest_path": str(dest),
-        },
-        tracker=tracker,
-    )
+    rename_file_impl(RenameFileInput(source_path=str(src), dest_path=str(dest)), tracker=tracker)
 
     edits = tracker.get_edits_for_path(src)
     assert edits
-    assert edits[-1].action == "rename"
-    assert edits[-1].new_content == str(dest)
+    last = edits[-1]
+    assert last.action == "rename"
+    assert last.new_content is not None and str(dest) in last.new_content

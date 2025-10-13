@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from tools.schemas import TODO_STATUSES, TodoWriteInput
 from session.turn_diff_tracker import TurnDiffTracker
+from tools.handler import ToolOutput
 
 
 _STORE_PATH = Path(".session_todos.json")
@@ -106,23 +107,17 @@ def _replace_todos(incoming: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return replaced
 
 
-def todo_write_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] = None) -> str:
-    try:
-        params = TodoWriteInput(**input)
-    except ValidationError as exc:
-        messages = []
-        for err in exc.errors():
-            loc = ".".join(str(part) for part in err.get("loc", ())) or "input"
-            messages.append(f"{loc}: {err.get('msg', 'invalid value')}")
-        raise ValueError("; ".join(messages)) from exc
-
+def todo_write_impl(params: TodoWriteInput, tracker: Optional[TurnDiffTracker] = None) -> ToolOutput:
     merge = params.merge
     todos_in = [todo.dump() for todo in params.todos]
 
     store = _load_store()
     existing: List[Dict[str, Any]] = store.get("todos", [])
 
-    updated = _merge_todos(existing, todos_in) if merge else _replace_todos(todos_in)
+    try:
+        updated = _merge_todos(existing, todos_in) if merge else _replace_todos(todos_in)
+    except ValueError as exc:
+        return ToolOutput(content=str(exc), success=False, metadata={"error_type": "validation"})
 
     store["todos"] = updated
     old_text: Optional[str] = None
@@ -149,4 +144,4 @@ def todo_write_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] = 
         if tracker is not None:
             tracker.unlock_file(_STORE_PATH)
 
-    return json.dumps(store)
+    return ToolOutput(content=json.dumps(store), success=True)

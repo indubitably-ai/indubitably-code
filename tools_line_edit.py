@@ -5,8 +5,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
-from pydantic import ValidationError
-
+from tools.handler import ToolOutput
 from tools.schemas import LINE_EDIT_MODES, LineEditInput
 from session.turn_diff_tracker import TurnDiffTracker
 
@@ -130,24 +129,15 @@ def _stream_line_edit(
 
 
 
-def line_edit_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] = None) -> str:
-    try:
-        params = LineEditInput(**input)
-    except ValidationError as exc:
-        messages = []
-        for err in exc.errors():
-            loc = ".".join(str(part) for part in err.get("loc", ())) or "input"
-            messages.append(f"{loc}: {err.get('msg', 'invalid value')}")
-        raise ValueError("; ".join(messages)) from exc
-
+def line_edit_impl(params: LineEditInput, tracker: Optional[TurnDiffTracker] = None) -> ToolOutput:
     path_value = params.path.strip()
     mode_value = params.mode
 
     target_path = Path(path_value)
     if not target_path.exists():
-        raise FileNotFoundError(path_value)
+        return ToolOutput(content=path_value, success=False, metadata={"error_type": "not_found"})
     if not target_path.is_file():
-        raise IsADirectoryError(path_value)
+        return ToolOutput(content=path_value, success=False, metadata={"error_type": "is_directory"})
 
     line_number = params.line
     anchor = params.anchor
@@ -166,20 +156,23 @@ def line_edit_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] = N
     if line_number is not None:
         if mode_value == "insert_before":
             if line_number > total_lines + 1:
-                raise ValueError("line out of range")
+                return ToolOutput(content="line out of range", success=False, metadata={"error_type": "edit_error"})
         elif mode_value == "insert_after":
             if line_number > total_lines:
-                raise ValueError("line out of range")
+                return ToolOutput(content="line out of range", success=False, metadata={"error_type": "edit_error"})
         else:
             if line_number > total_lines:
-                raise ValueError("line out of range")
+                return ToolOutput(content="line out of range", success=False, metadata={"error_type": "edit_error"})
 
-    index, byte_offset = _resolve_index(
-        lines=lines,
-        line_number=line_number,
-        anchor=anchor,
-        occurrence=occurrence,
-    )
+    try:
+        index, byte_offset = _resolve_index(
+            lines=lines,
+            line_number=line_number,
+            anchor=anchor,
+            occurrence=occurrence,
+        )
+    except Exception as exc:
+        return ToolOutput(content=str(exc), success=False, metadata={"error_type": "edit_error"})
 
     if mode_value == "insert_after":
         if index < len(lines):
@@ -187,12 +180,12 @@ def line_edit_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] = N
         index += 1
 
     if mode_value in {"replace", "delete"} and index >= total_lines:
-        raise ValueError("target line outside file range")
+        return ToolOutput(content="target line outside file range", success=False, metadata={"error_type": "edit_error"})
 
     if mode_value in {"replace", "delete"}:
         end_index = index + line_count
         if end_index > total_lines:
-            raise ValueError("line_count extends past end of file")
+            return ToolOutput(content="line_count extends past end of file", success=False, metadata={"error_type": "edit_error"})
     else:
         end_index = index
 
@@ -200,7 +193,7 @@ def line_edit_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] = N
     if mode_value in {"insert_before", "insert_after", "replace"}:
         insert_block = _normalize_text_block(text_value)
         if not insert_block:
-            raise ValueError("text must contain at least one line; use \"\n\" for a blank line")
+            return ToolOutput(content='text must contain at least one line; use "\\n" for a blank line', success=False, metadata={"error_type": "edit_error"})
 
     affected = line_count if mode_value in {"replace", "delete"} else len(insert_block)
 
@@ -227,7 +220,7 @@ def line_edit_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] = N
 
     if dry_run:
         base_result["dry_run"] = True
-        return json.dumps(base_result)
+        return ToolOutput(content=json.dumps(base_result), success=True)
 
     if tracker is not None:
         tracker.lock_file(target_path)
@@ -263,7 +256,7 @@ def line_edit_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] = N
             line_range=line_range,
         )
 
-    return json.dumps(base_result)
+    return ToolOutput(content=json.dumps(base_result), success=True)
 
 
 

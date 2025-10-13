@@ -1,12 +1,14 @@
 import json
 
 import pytest
-
+from tools.handler import ToolOutput
+from tools.schemas import LineEditInput
 from tools_line_edit import line_edit_impl
 
 
 def _call(payload):
-    return json.loads(line_edit_impl(payload))
+    out: ToolOutput = line_edit_impl(LineEditInput(**payload))
+    return json.loads(out.content)
 
 
 def test_insert_before_first_line(tmp_path, monkeypatch):
@@ -120,7 +122,7 @@ def test_invalid_text_for_insert(tmp_path, monkeypatch):
     (base / "t.txt").write_text("only\n", encoding="utf-8")
 
     with pytest.raises(ValueError):
-        line_edit_impl({"path": "t.txt", "mode": "insert_before", "line": 1, "text": ""})
+        line_edit_impl(LineEditInput(path="t.txt", mode="insert_before", line=1, text=""))
 
 
 def test_line_edit_dry_run(tmp_path, monkeypatch):
@@ -131,13 +133,8 @@ def test_line_edit_dry_run(tmp_path, monkeypatch):
     target = base / "file.txt"
     target.write_text("one\n", encoding="utf-8")
 
-    result = json.loads(line_edit_impl({
-        "path": "file.txt",
-        "mode": "insert_after",
-        "line": 1,
-        "text": "two\n",
-        "dry_run": True,
-    }))
+    out: ToolOutput = line_edit_impl(LineEditInput(path="file.txt", mode="insert_after", line=1, text="two\n", dry_run=True))
+    result = json.loads(out.content)
 
     assert result["dry_run"] is True
     assert "offset_start" in result and "offset_end" in result
@@ -152,13 +149,8 @@ def test_line_edit_large_file_warning(tmp_path, monkeypatch):
     big_lines = "\n".join(f"line{i}" for i in range(2100)) + "\n"
     (base / "big.txt").write_text(big_lines, encoding="utf-8")
 
-    result = json.loads(line_edit_impl({
-        "path": "big.txt",
-        "mode": "insert_after",
-        "line": 1,
-        "text": "inserted\n",
-        "dry_run": True,
-    }))
+    out: ToolOutput = line_edit_impl(LineEditInput(path="big.txt", mode="insert_after", line=1, text="inserted\n", dry_run=True))
+    result = json.loads(out.content)
 
     assert result["dry_run"] is True
     assert "warning" in result and "file has" in result["warning"]
@@ -172,5 +164,6 @@ def test_anchor_not_found(tmp_path, monkeypatch):
 
     (base / "f.txt").write_text("one\ntwo\n", encoding="utf-8")
 
-    with pytest.raises(ValueError):
-        line_edit_impl({"path": "f.txt", "mode": "delete", "anchor": "missing"})
+    out = line_edit_impl(LineEditInput(path="f.txt", mode="delete", anchor="missing"))
+    assert out.success is False
+    assert "anchor not found" in out.content

@@ -44,21 +44,23 @@ def test_read_file_full(sample_file: Tuple[ToolTestHarness, Path]):
     harness, path = sample_file
     output = asyncio.run(_invoke(harness, {"path": str(path)}))
     assert output.success is True
-    assert output.content.startswith("one")
-    assert "fourth" in output.content
+    data = json.loads(output.content)
+    assert data["content"].startswith("one")
+    assert "fourth" in data["content"]
 
 
 def test_read_file_tail_lines(sample_file: Tuple[ToolTestHarness, Path]):
     harness, path = sample_file
     output = asyncio.run(_invoke(harness, {"path": str(path), "tail_lines": 2}))
     assert output.success is True
-    assert output.content.splitlines() == ["third", "fourth"]
+    data = json.loads(output.content)
+    assert data["content"].splitlines() == ["third", "fourth"]
 
 
 def test_read_file_line_range(sample_file: Tuple[ToolTestHarness, Path]):
     harness, path = sample_file
     output = asyncio.run(_invoke(harness, {"path": str(path), "offset": 2, "limit": 1}))
-    assert output.content == "second"
+    assert json.loads(output.content)["content"] == "second"
 
 
 def test_read_file_missing_path_returns_error(tmp_path: Path):
@@ -83,4 +85,4 @@ def test_read_file_byte_range(sample_file: Tuple[ToolTestHarness, Path]):
             {"path": str(path), "byte_offset": 4, "byte_limit": 2},
         )
     )
-    assert output.content == "se"
+    assert json.loads(output.content)["content"] == "se"

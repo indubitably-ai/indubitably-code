@@ -6,7 +6,7 @@ import inspect
 from typing import Any, Callable, Dict, TYPE_CHECKING
 
 from ..handler import ToolHandler, ToolInvocation, ToolKind, ToolOutput
-from ..schemas import validate_tool_input
+from ..schemas import parse_tool_input, validate_tool_input
 from ..payload import FunctionToolPayload, ToolPayload
 from errors import ToolError
 
@@ -36,14 +36,14 @@ class FunctionToolHandler(ToolHandler):
             )
 
         try:
-            arguments = validate_tool_input(self._tool.name, invocation.payload.arguments)
+            model = parse_tool_input(self._tool.name, invocation.payload.arguments)
         except ValueError as exc:
             return ToolOutput(content=str(exc), success=False, metadata={"error_type": "validation"})
 
         def _call() -> Any:
             if invocation.tracker is not None and self._accepts_tracker:
-                return self._tool.fn(arguments, invocation.tracker)
-            return self._tool.fn(arguments)
+                return self._tool.fn(model, invocation.tracker)
+            return self._tool.fn(model)
 
         try:
             try:

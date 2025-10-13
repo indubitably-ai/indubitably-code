@@ -11,3 +11,6 @@ wheels/
 .pytest_cache/
 .uv-cache/
 .python-version
+
+# Local run outputs
+run_artifacts/

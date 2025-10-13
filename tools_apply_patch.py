@@ -5,8 +5,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from pydantic import ValidationError
-
+from tools.handler import ToolOutput
 from tools.schemas import ApplyPatchInput
 from session.turn_diff_tracker import TurnDiffTracker
 
@@ -289,16 +288,7 @@ def _infer_unified_action(
     return "update"
 
 
-def apply_patch_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] = None) -> str:
-    try:
-        params = ApplyPatchInput(**input)
-    except ValidationError as exc:
-        messages = []
-        for err in exc.errors():
-            loc = ".".join(str(part) for part in err.get("loc", ())) or "input"
-            messages.append(f"{loc}: {err.get('msg', 'invalid value')}")
-        raise ValueError("; ".join(messages)) from exc
-
+def apply_patch_impl(params: ApplyPatchInput, tracker: Optional[TurnDiffTracker] = None) -> ToolOutput:
     file_path = params.file_path.strip()
     patch = params.patch
     dry_run = params.dry_run
@@ -322,7 +312,7 @@ def apply_patch_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] =
     # Reject binary patches up front
     binary_marker = _detect_binary_patch(patch)
     if binary_marker:
-        return _build_error(desired_action, file_path, "binary patches are not supported", dry_run=dry_run)
+        return ToolOutput(content=_build_error(desired_action, file_path, "binary patches are not supported", dry_run=dry_run), success=False, metadata={"error_type": "patch_error"})
 
     # Reject header mismatches to avoid accidental renames
     if header_path and header_path not in ("/dev/null", ""):
@@ -333,12 +323,12 @@ def apply_patch_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] =
                     f" Detected rename from '{rename_from}' to '{rename_to}'. "
                     "Run rename_file first, then re-apply the patch."
                 )
-            return _build_error(
+            return ToolOutput(content=_build_error(
                 desired_action,
                 file_path,
                 f"patch header path '{header_path}' does not match file_path '{file_path}'.{rename_hint}",
                 dry_run=dry_run,
-            )
+            ), success=False, metadata={"error_type": "patch_error"})
 
     # Prefer unified diff semantics when available
     if unified:
@@ -358,17 +348,17 @@ def apply_patch_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] =
                         f" Detected rename from '{rename_from}' to '{rename_to}'. "
                         "Use rename_file before applying this patch."
                     )
-                return _build_error(
+                return ToolOutput(content=_build_error(
                     inferred_action.capitalize(),
                     file_path,
                     f"unified diff path '{header_value}' does not match file_path '{file_path}'.{rename_hint}",
                     dry_run=dry_run,
-                )
+                ), success=False, metadata={"error_type": "patch_error"})
 
         if inferred_action == "delete":
             if dry_run:
                 note = None if file_exists else "file did not exist"
-                return _build_success("Delete", file_path, dry_run=True, note=note)
+                return ToolOutput(content=_build_success("Delete", file_path, dry_run=True, note=note), success=True)
             existing_text: Optional[str] = None
             if target.exists():
                 try:
@@ -387,11 +377,11 @@ def apply_patch_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] =
                         old_content=existing_text,
                         new_content=None,
                     )
-                return _build_success("Delete", file_path)
+                return ToolOutput(content=_build_success("Delete", file_path), success=True)
             except FileNotFoundError:
-                return _build_success("Delete", file_path, note="file did not exist")
+                return ToolOutput(content=_build_success("Delete", file_path, note="file did not exist"), success=True)
             except Exception as exc:
-                return _build_error("Delete", file_path, str(exc), dry_run=dry_run)
+                return ToolOutput(content=_build_error("Delete", file_path, str(exc), dry_run=dry_run), success=False, metadata={"error_type": "patch_error"})
             finally:
                 if tracker is not None:
                     tracker.unlock_file(target)
@@ -400,7 +390,7 @@ def apply_patch_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] =
             original = target.read_text(encoding="utf-8") if file_exists else ""
             updated = _apply_unified_diff(original, unified["hunks"])
             if dry_run:
-                return _build_success(inferred_action.capitalize(), file_path, dry_run=True)
+                return ToolOutput(content=_build_success(inferred_action.capitalize(), file_path, dry_run=True), success=True)
             _ensure_parent_dirs(target)
             if tracker is not None:
                 tracker.lock_file(target)
@@ -427,7 +417,7 @@ def apply_patch_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] =
             finally:
                 if tracker is not None:
                     tracker.unlock_file(target)
-            return _build_success(inferred_action.capitalize(), file_path)
+            return ToolOutput(content=_build_success(inferred_action.capitalize(), file_path), success=True)
         except Exception as exc:
             message = str(exc)
             if isinstance(exc, ValueError):
@@ -438,12 +428,12 @@ def apply_patch_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] =
                     )
                 elif "overlapping hunks" in message:
                     message = f"{message}. Split the patch into non-overlapping hunks and retry."
-            return _build_error("Update", file_path, message, dry_run=dry_run)
+            return ToolOutput(content=_build_error("Update", file_path, message, dry_run=dry_run), success=False, metadata={"error_type": "patch_error"})
 
     if action.lower() == "delete":
         if dry_run:
             note = None if target.exists() else "file did not exist"
-            return _build_success("Delete", file_path, dry_run=True, note=note)
+            return ToolOutput(content=_build_success("Delete", file_path, dry_run=True, note=note), success=True)
         existing_text: Optional[str] = None
         if target.exists():
             try:
@@ -462,11 +452,11 @@ def apply_patch_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] =
                     old_content=existing_text,
                     new_content=None,
                 )
-            return _build_success("Delete", file_path)
+            return ToolOutput(content=_build_success("Delete", file_path), success=True)
         except FileNotFoundError:
-            return _build_success("Delete", file_path, note="file did not exist")
+            return ToolOutput(content=_build_success("Delete", file_path, note="file did not exist"), success=True)
         except Exception as exc:
-            return _build_error("Delete", file_path, str(exc), dry_run=dry_run)
+            return ToolOutput(content=_build_error("Delete", file_path, str(exc), dry_run=dry_run), success=False, metadata={"error_type": "patch_error"})
         finally:
             if tracker is not None:
                 tracker.unlock_file(target)
@@ -475,7 +465,7 @@ def apply_patch_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] =
         try:
             content = _extract_add_content(patch)
             if dry_run:
-                return _build_success("Add", file_path, dry_run=True)
+                return ToolOutput(content=_build_success("Add", file_path, dry_run=True), success=True)
             _ensure_parent_dirs(target)
             if tracker is not None:
                 tracker.lock_file(target)
@@ -492,9 +482,9 @@ def apply_patch_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] =
             finally:
                 if tracker is not None:
                     tracker.unlock_file(target)
-            return _build_success("Add", file_path)
+            return ToolOutput(content=_build_success("Add", file_path), success=True)
         except Exception as exc:
-            return _build_error("Add", file_path, str(exc), dry_run=dry_run)
+            return ToolOutput(content=_build_error("Add", file_path, str(exc), dry_run=dry_run), success=False, metadata={"error_type": "patch_error"})
 
     # Default to Update when header missing or 'Update'
     try:
@@ -512,7 +502,7 @@ def apply_patch_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] =
             new_content = _extract_add_content(patch)
 
         if dry_run:
-            return _build_success("Update", file_path, dry_run=True)
+            return ToolOutput(content=_build_success("Update", file_path, dry_run=True), success=True)
 
         _ensure_parent_dirs(target)
         if tracker is not None:
@@ -530,7 +520,7 @@ def apply_patch_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] =
         finally:
             if tracker is not None:
                 tracker.unlock_file(target)
-        return _build_success("Update", file_path)
+        return ToolOutput(content=_build_success("Update", file_path), success=True)
     except Exception as exc:
         message = str(exc)
         if isinstance(exc, ValueError):
@@ -539,4 +529,4 @@ def apply_patch_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] =
                     f"{message}. The patch context does not match the current file; "
                     "ensure the file is up to date or regenerate the diff."
                 )
-        return _build_error("Update", file_path, message, dry_run=dry_run)
+        return ToolOutput(content=_build_error("Update", file_path, message, dry_run=dry_run), success=False, metadata={"error_type": "patch_error"})

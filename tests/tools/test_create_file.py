@@ -7,6 +7,7 @@ import pytest
 from agent import Tool
 from tools.handlers.function import FunctionToolHandler
 from tools_create_file import create_file_impl
+from tools.schemas import CreateFileInput
 from session.turn_diff_tracker import TurnDiffTracker
 from tests.tool_harness import MockToolContext, ToolTestHarness
 
@@ -114,7 +115,7 @@ def test_create_file_records_tracker(tmp_path: Path) -> None:
     path = tmp_path / "tracked.txt"
     tracker = TurnDiffTracker(turn_id=5)
 
-    create_file_impl({"path": str(path), "content": "hello"}, tracker=tracker)
+    create_file_impl(CreateFileInput(path=str(path), content="hello"), tracker=tracker)
 
     edits = tracker.get_edits_for_path(path)
     assert len(edits) == 1

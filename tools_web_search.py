@@ -5,6 +5,8 @@ import re
 import gzip
 import zlib
 from typing import Dict, Any, List, Tuple
+from tools.handler import ToolOutput
+from tools.schemas import WebSearchInput
 from urllib.parse import quote_plus, urlparse, parse_qs, unquote
 from urllib.request import Request, urlopen, build_opener, HTTPCookieProcessor
 import http.cookiejar as cookiejar
@@ -335,11 +337,9 @@ def _search_wikipedia(term: str, max_results: int) -> List[Dict[str, str]]:
         return []
 
 
-def web_search_impl(input: Dict[str, Any]) -> str:
-    term = (input.get("search_term") or "").strip()
-    if not term:
-        raise ValueError("missing 'search_term'")
-    max_results = int(input.get("max_results") or 10)
+def web_search_impl(params: WebSearchInput) -> ToolOutput:
+    term = (params.search_term or "").strip()
+    max_results = int(params.max_results or 10)
 
     start_ts = time.time()
     engine = "duckduckgo"
@@ -353,7 +353,6 @@ def web_search_impl(input: Dict[str, Any]) -> str:
         results = []
 
     if not results:
-        # Try DuckDuckGo Instant Answer API
         fallback = _search_duckduckgo_api(term, max_results)
         if fallback:
             engine = "duckduckgo_api"
@@ -362,7 +361,6 @@ def web_search_impl(input: Dict[str, Any]) -> str:
             results = fallback
 
     if not results:
-        # Attempt Bing fallback
         fallback = _search_bing(term, max_results)
         if fallback:
             engine = "bing"
@@ -371,7 +369,6 @@ def web_search_impl(input: Dict[str, Any]) -> str:
             results = fallback
 
     if not results:
-        # Try Wikipedia as a generic knowledge fallback
         fallback = _search_wikipedia(term, max_results)
         if fallback:
             engine = "wikipedia"
@@ -382,10 +379,15 @@ def web_search_impl(input: Dict[str, Any]) -> str:
     if not results and note is None:
         note = "duckduckgo returned no parseable results"
 
-    return json.dumps({
-        "query": term,
-        "engine": engine,
-        "results": results,
-        "took_ms": int((time.time() - start_ts) * 1000),
-        **({"note": note} if note else {}),
-    })
+    try:
+        payload = {
+            "query": term,
+            "engine": engine,
+            "results": results,
+            "took_ms": int((time.time() - start_ts) * 1000),
+        }
+        if note:
+            payload["note"] = note
+        return ToolOutput(content=json.dumps(payload), success=True)
+    except Exception as exc:
+        return ToolOutput(content=f"Web search failed: {exc}", success=False, metadata={"error_type": "search_error"})

@@ -5,8 +5,7 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Pattern
 
-from pydantic import ValidationError
-
+from tools.handler import ToolOutput
 from tools.schemas import GrepInput
 
 
@@ -131,42 +130,51 @@ def _count_matches(files: List[str], regex: Pattern[str]) -> Dict[str, int]:
     return counts
 
 
-def grep_impl(input: Dict[str, Any]) -> str:
+def grep_impl(params: GrepInput) -> ToolOutput:
     try:
-        params = GrepInput(**input)
-    except ValidationError as exc:
-        messages = []
-        for err in exc.errors():
-            loc = ".".join(str(part) for part in err.get("loc", ())) or "input"
-            messages.append(f"{loc}: {err.get('msg', 'invalid value')}")
-        raise ValueError("; ".join(messages)) from exc
+        base = params.path or "."
+        glob = params.include
+        output_mode = params.output_mode
+        before = params.before
+        after = params.after
+        around = params.around
+        ignore_case = params.case_insensitive
+        multiline = params.multiline
+        head_limit = params.head_limit
 
-    base = params.path or "."
-    glob = params.include
-    output_mode = params.output_mode
-    before = params.before
-    after = params.after
-    around = params.around
-    ignore_case = params.case_insensitive
-    multiline = params.multiline
-    head_limit = params.head_limit
+        regex = _compile_pattern(params.pattern, ignore_case, multiline)
+        files = _iter_files(base, glob)
 
-    regex = _compile_pattern(params.pattern, ignore_case, multiline)
+        import json as _json
+        if output_mode == "files_with_matches":
+            matches = _collect_files_with_matches(files, regex, head_limit)
+            return ToolOutput(content=_json.dumps({
+                "pattern": params.pattern,
+                "path": base,
+                "files": matches,
+                "total": len(matches),
+            }), success=True)
+        if output_mode == "count":
+            counts = _count_matches(files, regex)
+            return ToolOutput(content=_json.dumps({
+                "pattern": params.pattern,
+                "path": base,
+                "counts": counts,
+                "total": sum(counts.values()),
+            }), success=True)
 
-    files = _iter_files(base, glob)
-
-    if output_mode == "files_with_matches":
-        matches = _collect_files_with_matches(files, regex, head_limit)
-        return json.dumps(matches)
-    if output_mode == "count":
-        counts = _count_matches(files, regex)
-        return json.dumps(counts)
-
-    lines: List[str] = []
-    for path in files:
-        chunk = _find_matches_in_file(path, regex, before, after, around, head_limit)
-        if chunk:
-            lines.extend(chunk)
-            if head_limit is not None and len(lines) >= head_limit:
-                break
-    return json.dumps(lines)
+        lines: List[str] = []
+        for path in files:
+            chunk = _find_matches_in_file(path, regex, before, after, around, head_limit)
+            if chunk:
+                lines.extend(chunk)
+                if head_limit is not None and len(lines) >= head_limit:
+                    break
+        return ToolOutput(content=_json.dumps({
+            "pattern": params.pattern,
+            "path": base,
+            "matches": lines,
+            "total": len(lines),
+        }), success=True)
+    except Exception as exc:
+        return ToolOutput(content=f"Grep failed: {exc}", success=False, metadata={"error_type": "search_error"})

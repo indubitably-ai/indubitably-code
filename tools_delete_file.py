@@ -5,8 +5,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from pydantic import ValidationError
-
+from tools.handler import ToolOutput
 from tools.schemas import DeleteFileInput
 from session.turn_diff_tracker import TurnDiffTracker
 
@@ -26,21 +25,12 @@ def delete_file_tool_def() -> dict:
     }
 
 
-def delete_file_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] = None) -> str:
-    try:
-        params = DeleteFileInput(**input)
-    except ValidationError as exc:
-        messages = []
-        for err in exc.errors():
-            loc = ".".join(str(part) for part in err.get("loc", ())) or "input"
-            messages.append(f"{loc}: {err.get('msg', 'invalid value')}")
-        raise ValueError("; ".join(messages)) from exc
-
+def delete_file_impl(params: DeleteFileInput, tracker: Optional[TurnDiffTracker] = None) -> ToolOutput:
     path = params.path.strip()
     target = Path(path)
 
     if target.exists() and target.is_dir():
-        return json.dumps({"ok": False, "error": "path is a directory", "path": path})
+        return ToolOutput(content=json.dumps({"ok": False, "error": "path is a directory", "path": path}), success=False, metadata={"error_type": "is_directory"})
 
     old_content: Optional[str] = None
     if target.exists() and not target.is_dir():
@@ -61,11 +51,11 @@ def delete_file_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] =
                 old_content=old_content,
                 new_content=None,
             )
-        return json.dumps({"ok": True, "path": path})
+        return ToolOutput(content=json.dumps({"ok": True, "path": path}), success=True)
     except FileNotFoundError:
-        return json.dumps({"ok": True, "path": path, "note": "file did not exist"})
+        return ToolOutput(content=json.dumps({"ok": True, "path": path, "note": "file did not exist"}), success=True)
     except Exception as exc:  # pragma: no cover - defensive
-        return json.dumps({"ok": False, "path": path, "error": str(exc)})
+        return ToolOutput(content=json.dumps({"ok": False, "path": path, "error": str(exc)}), success=False, metadata={"error_type": "delete_error"})
     finally:
         if tracker is not None:
             tracker.unlock_file(target)

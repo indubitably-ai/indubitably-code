@@ -1,11 +1,13 @@
 import json
 import pytest
 
+from tools.schemas import TemplateBlockInput
 from tools_template_block import template_block_impl
 
 
 def _call(payload):
-    return json.loads(template_block_impl(payload))
+    out = template_block_impl(TemplateBlockInput(**payload))
+    return json.loads(out.content)
 
 
 def test_insert_before_anchor(tmp_path, monkeypatch):
@@ -111,16 +113,16 @@ def test_anchor_not_found(tmp_path, monkeypatch):
 
     (base / "file.txt").write_text("content\n", encoding="utf-8")
 
-    result = json.loads(template_block_impl({
+    out = template_block_impl(TemplateBlockInput(**{
         "path": "file.txt",
         "mode": "insert_after",
         "anchor": "missing\n",
         "template": "new\n",
     }))
+    result = json.loads(out.content)
     assert result["ok"] is False
     assert "not found" in result["error"]
     assert result.get("total_lines") == 1
-
 
 
 

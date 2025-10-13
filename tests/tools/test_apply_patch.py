@@ -8,6 +8,7 @@ import pytest
 from agent import Tool
 from tools.handlers.function import FunctionToolHandler
 from tools_apply_patch import apply_patch_impl
+from tools.schemas import ApplyPatchInput
 from session.turn_diff_tracker import TurnDiffTracker
 from tests.tool_harness import MockToolContext, ToolTestHarness
 
@@ -97,7 +98,7 @@ def test_apply_patch_records_tracker(tmp_path: Path) -> None:
 """
     tracker = TurnDiffTracker(turn_id=9)
 
-    apply_patch_impl({"file_path": str(path), "patch": patch}, tracker=tracker)
+    apply_patch_impl(ApplyPatchInput(file_path=str(path), patch=patch), tracker=tracker)
 
     edits = tracker.get_edits_for_path(path)
     assert edits

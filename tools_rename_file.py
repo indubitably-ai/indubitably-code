@@ -5,8 +5,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from pydantic import ValidationError
-
+from tools.handler import ToolOutput
 from tools.schemas import RenameFileInput
 from session.turn_diff_tracker import TurnDiffTracker
 
@@ -48,16 +47,7 @@ def rename_file_tool_def() -> dict:
     }
 
 
-def rename_file_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] = None) -> str:
-    try:
-        params = RenameFileInput(**input)
-    except ValidationError as exc:
-        messages = []
-        for err in exc.errors():
-            loc = ".".join(str(part) for part in err.get("loc", ())) or "input"
-            messages.append(f"{loc}: {err.get('msg', 'invalid value')}")
-        raise ValueError("; ".join(messages)) from exc
-
+def rename_file_impl(params: RenameFileInput, tracker: Optional[TurnDiffTracker] = None) -> ToolOutput:
     source_value = params.source_path.strip()
     dest_value = params.dest_path.strip()
     overwrite = params.overwrite
@@ -68,16 +58,16 @@ def rename_file_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] =
     dest = Path(dest_value)
 
     if not source.exists():
-        raise FileNotFoundError(source_value)
+        return ToolOutput(content=source_value, success=False, metadata={"error_type": "not_found"})
     if source.is_dir():
-        raise IsADirectoryError("source path is a directory")
+        return ToolOutput(content="source path is a directory", success=False, metadata={"error_type": "is_directory"})
 
     dest_existed = dest.exists()
     if dest_existed:
         if not overwrite:
-            raise FileExistsError(dest_value)
+            return ToolOutput(content=dest_value, success=False, metadata={"error_type": "exists"})
         if dest.is_dir():
-            raise IsADirectoryError("destination path is a directory")
+            return ToolOutput(content="destination path is a directory", success=False, metadata={"error_type": "is_directory"})
 
     dest_parent = dest.parent
     if not dest_parent.exists():
@@ -85,17 +75,17 @@ def rename_file_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] =
             if not dry_run:
                 dest_parent.mkdir(parents=True, exist_ok=True)
         else:
-            raise FileNotFoundError(f"destination parent missing: {dest_parent}")
+            return ToolOutput(content=f"destination parent missing: {dest_parent}", success=False, metadata={"error_type": "not_found"})
 
     if dry_run:
-        return json.dumps({
+        return ToolOutput(content=json.dumps({
             "ok": True,
             "action": "rename",
             "source": source_value,
             "destination": dest_value,
             "overwritten": bool(dest_existed),
             "dry_run": True,
-        })
+        }), success=True)
 
     if tracker is not None:
         tracker.lock_file(source)
@@ -133,4 +123,4 @@ def rename_file_impl(input: Dict[str, Any], tracker: Optional[TurnDiffTracker] =
         "destination": dest_value,
         "overwritten": bool(dest_existed),
     }
-    return json.dumps(result)
+    return ToolOutput(content=json.dumps(result), success=True)

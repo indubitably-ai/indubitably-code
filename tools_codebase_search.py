@@ -2,6 +2,8 @@ import os
 import json
 import time
 from typing import Dict, Any, List, Tuple, Optional
+from tools.handler import ToolOutput
+from tools.schemas import CodebaseSearchInput
 
 
 _IGNORED_DIRS = {".git", ".hg", ".svn", "node_modules", "target", "dist", "build", ".venv", "__pycache__"}
@@ -151,37 +153,36 @@ def _build_snippet(path: str, lines: List[str], match_lines: List[int], context:
     return "\n".join(out)
 
 
-def codebase_search_impl(input: Dict[str, Any]) -> str:
-    query = input.get("query", "").strip()
-    if not query:
-        raise ValueError("missing 'query'")
+def codebase_search_impl(params: CodebaseSearchInput) -> ToolOutput:
+    try:
+        query = params.query.strip()
+        bases = params.target_directories or []
+        glob_pattern = params.glob_pattern
+        max_results = int(params.max_results or 10)
+        snippet_lines = int(params.snippet_lines or 2)
 
-    bases = input.get("target_directories") or []
-    glob_pattern = input.get("glob_pattern")
-    max_results = int(input.get("max_results") or 10)
-    snippet_lines = int(input.get("snippet_lines") or 2)
+        files = _iter_files(bases, glob_pattern)
 
-    files = _iter_files(bases, glob_pattern)
+        scored: List[Tuple[float, str, List[Tuple[int, str]]]] = []
+        for path in files:
+            lines = _read_lines(path)
+            score, matches = _score_and_matches(path, lines, query)
+            if score > 0 and matches:
+                scored.append((score, path, matches))
 
-    scored: List[Tuple[float, str, List[Tuple[int, str]]]] = []
-    for path in files:
-        lines = _read_lines(path)
-        score, matches = _score_and_matches(path, lines, query)
-        if score > 0 and matches:
-            scored.append((score, path, matches))
+        scored.sort(key=lambda t: (t[0], os.path.getmtime(t[1]) if os.path.exists(t[1]) else 0), reverse=True)
 
-    # Sort by score desc, then by recency (mtime)
-    scored.sort(key=lambda t: (t[0], os.path.getmtime(t[1]) if os.path.exists(t[1]) else 0), reverse=True)
+        results = []
+        for score, path, matches in scored[:max_results]:
+            match_line_numbers = [ln for ln, _ in matches]
+            snippet = _build_snippet(path, _read_lines(path), match_line_numbers, snippet_lines)
+            results.append({
+                "path": path,
+                "score": round(score, 3),
+                "matches": [{"line": ln, "text": txt} for ln, txt in matches[:10]],
+                "snippet": snippet,
+            })
 
-    results = []
-    for score, path, matches in scored[:max_results]:
-        match_line_numbers = [ln for ln, _ in matches]
-        snippet = _build_snippet(path, _read_lines(path), match_line_numbers, snippet_lines)
-        results.append({
-            "path": path,
-            "score": round(score, 3),
-            "matches": [{"line": ln, "text": txt} for ln, txt in matches[:10]],
-            "snippet": snippet,
-        })
-
-    return json.dumps({"query": query, "results": results})
+        return ToolOutput(content=json.dumps({"query": query, "results": results}), success=True)
+    except Exception as exc:
+        return ToolOutput(content=f"Codebase search failed: {exc}", success=False, metadata={"error_type": "search_error"})

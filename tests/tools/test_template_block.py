@@ -1,45 +1,25 @@
-import asyncio
 import json
 from pathlib import Path
 from typing import Tuple
 
 import pytest
 
-from agent import Tool
-from tools.handlers.function import FunctionToolHandler
-from tools_template_block import template_block_impl
 from session.turn_diff_tracker import TurnDiffTracker
-from tests.tool_harness import MockToolContext, ToolTestHarness
+from tools.schemas import TemplateBlockInput
+from tools_template_block import template_block_impl
 
 
-def _make_tool() -> Tool:
-    return Tool(
-        name="template_block",
-        description="",
-        input_schema={"type": "object"},
-        fn=template_block_impl,
-    )
-
-
-def _harness(tmp_path: Path) -> Tuple[ToolTestHarness, Path]:
-    base = tmp_path / "repo"
-    base.mkdir()
-    context = MockToolContext.create(cwd=base)
-    handler = FunctionToolHandler(_make_tool())
-    return ToolTestHarness(handler, context=context), base
-
-
-def _invoke(harness: ToolTestHarness, payload: dict[str, object]) -> dict[str, object]:
-    result = asyncio.run(harness.invoke("template_block", payload))
-    return json.loads(result.content)
+def _invoke(payload: dict) -> dict:
+    out = template_block_impl(TemplateBlockInput(**payload))
+    return json.loads(out.content)
 
 
 def test_template_insert_before(tmp_path: Path):
-    harness, base = _harness(tmp_path)
+    base = tmp_path / "repo"
+    base.mkdir()
     path = base / "file.txt"
     path.write_text("alpha\nbeta\n", encoding="utf-8")
     result = _invoke(
-        harness,
         {
             "path": str(path),
             "mode": "insert_before",
@@ -52,11 +32,11 @@ def test_template_insert_before(tmp_path: Path):
 
 
 def test_template_replace_with_expected(tmp_path: Path):
-    harness, base = _harness(tmp_path)
+    base = tmp_path / "repo"
+    base.mkdir()
     path = base / "file.txt"
     path.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
     result = _invoke(
-        harness,
         {
             "path": str(path),
             "mode": "replace_block",
@@ -70,11 +50,11 @@ def test_template_replace_with_expected(tmp_path: Path):
 
 
 def test_template_replace_mismatch_returns_error(tmp_path: Path):
-    harness, base = _harness(tmp_path)
+    base = tmp_path / "repo"
+    base.mkdir()
     path = base / "file.txt"
     path.write_text("alpha\nbeta\n", encoding="utf-8")
     result = _invoke(
-        harness,
         {
             "path": str(path),
             "mode": "replace_block",
@@ -88,11 +68,11 @@ def test_template_replace_mismatch_returns_error(tmp_path: Path):
 
 
 def test_template_missing_anchor(tmp_path: Path):
-    harness, base = _harness(tmp_path)
+    base = tmp_path / "repo"
+    base.mkdir()
     path = base / "file.txt"
     path.write_text("alpha\n", encoding="utf-8")
     result = _invoke(
-        harness,
         {
             "path": str(path),
             "mode": "insert_before",
@@ -105,17 +85,19 @@ def test_template_missing_anchor(tmp_path: Path):
 
 
 def test_template_block_records_tracker(tmp_path: Path) -> None:
-    path = tmp_path / "file.txt"
+    base = tmp_path / "repo"
+    base.mkdir()
+    path = base / "file.txt"
     path.write_text("alpha\nbeta\n", encoding="utf-8")
     tracker = TurnDiffTracker(turn_id=11)
 
     template_block_impl(
-        {
+        TemplateBlockInput(**{
             "path": str(path),
             "mode": "insert_after",
             "anchor": "alpha\n",
             "template": "inserted\n",
-        },
+        }),
         tracker=tracker,
     )
 
