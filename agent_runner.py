@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import sys
 import time
@@ -61,6 +62,7 @@ class _PendingToolCall:
     tool_name: str
     turn_idx: int
     tracker: TurnDiffTracker
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -297,6 +299,36 @@ class AgentRunner:
                             break
                         continue
 
+                    call_metadata: Dict[str, Any] = {}
+                    if tool is not None and tool.capabilities and "write_fs" in tool.capabilities:
+                        exec_context = getattr(context, "exec_context", None)
+                        if exec_context and exec_context.requires_approval(tool.name, is_write=True):
+                            approved, call_metadata = self._confirm_write_approval(
+                                context,
+                                tool=tool,
+                                tool_input=tool_input,
+                            )
+                            if not approved:
+                                block_result, event = self._record_tool_event(
+                                    turn_idx=turn_idx,
+                                    tool_name=tool_name,
+                                    tool_input=tool_input,
+                                    tool_use_id=tool_use_id,
+                                    result_str="Tool execution denied by approval policy",
+                                    is_error=True,
+                                    skipped=True,
+                                    tool=tool,
+                                    extra_metadata=call_metadata,
+                                )
+                                tool_results_content.append(block_result)
+                                tool_error = tool_error or event.is_error
+                                if event.metadata.get("error_type") == "fatal":
+                                    fatal_event = event
+                                    stopped_reason = "fatal_tool_error"
+                                    turns_used = turn_idx
+                                    break
+                                continue
+
                     pending_calls.append(
                         _PendingToolCall(
                             call=call,
@@ -306,6 +338,7 @@ class AgentRunner:
                             turn_idx=turn_idx,
                             tool_name=tool_name,
                             tracker=turn_tracker,
+                            metadata=call_metadata,
                         )
                     )
 
@@ -321,16 +354,27 @@ class AgentRunner:
             if pending_calls and not fatal_event:
                 runtime_blocks = self._execute_pending_calls(pending_calls)
                 for pending, runtime_result in zip(pending_calls, runtime_blocks):
+                    updated_block = runtime_result
+                    extra_metadata = pending.metadata or None
+                    if pending.metadata:
+                        merged_meta = dict(runtime_result.get("metadata", {}))
+                        merged_meta.update(pending.metadata)
+                        updated_block = dict(runtime_result)
+                        updated_block["metadata"] = merged_meta
+                        if "error_type" not in updated_block and "error_type" in merged_meta:
+                            updated_block["error_type"] = merged_meta["error_type"]
+
                     result_block, event = self._record_tool_event(
                         turn_idx=pending.turn_idx,
                         tool_name=pending.tool_name,
                         tool_input=pending.tool_input,
                         tool_use_id=pending.tool_use_id,
-                        result_str=str(runtime_result.get("content", "")),
-                        is_error=bool(runtime_result.get("is_error")),
+                        result_str=str(updated_block.get("content", "")),
+                        is_error=bool(updated_block.get("is_error")),
                         skipped=False,
                         tool=pending.tool,
-                        prebuilt_block=runtime_result,
+                        prebuilt_block=updated_block,
+                        extra_metadata=extra_metadata,
                     )
                     tool_results_content.append(result_block)
                     tool_error = tool_error or event.is_error
@@ -684,11 +728,17 @@ class AgentRunner:
         skipped: bool,
         tool: Optional[Tool],
         prebuilt_block: Optional[Dict[str, Any]] = None,
+        extra_metadata: Optional[Dict[str, Any]] = None,
     ) -> tuple[Dict[str, Any], ToolEvent]:
         paths = _extract_paths(tool_input)
-        metadata = {}
+        metadata: Dict[str, Any] = {}
         if prebuilt_block is not None:
             metadata = dict(prebuilt_block.get("metadata", {}))
+        if extra_metadata:
+            metadata.update(extra_metadata)
+        error_type = metadata.get("error_type")
+        if error_type is None and prebuilt_block is not None:
+            error_type = prebuilt_block.get("error_type")
 
         event = ToolEvent(
             turn=turn_idx,
@@ -730,10 +780,66 @@ class AgentRunner:
             }
 
         if metadata:
-            block.setdefault("metadata", metadata)
-            block.setdefault("error_type", metadata.get("error_type"))
+            block_metadata = dict(block.get("metadata", {}))
+            block_metadata.update(metadata)
+            block["metadata"] = block_metadata
+        if error_type and "error_type" not in block:
+            block["error_type"] = error_type
 
         return block, event
+
+    def _confirm_write_approval(
+        self,
+        context: ContextSession,
+        *,
+        tool: Tool,
+        tool_input: Dict[str, Any],
+    ) -> tuple[bool, Dict[str, Any]]:
+        exec_context = getattr(context, "exec_context", None)
+        metadata: Dict[str, Any] = {"approval_required": True}
+        policy = getattr(exec_context, "approval_policy", None)
+        if policy is not None:
+            metadata["approval_policy"] = getattr(policy, "value", str(policy))
+
+        paths = _extract_paths(tool_input)
+        if paths:
+            metadata["approval_paths"] = list(paths)
+
+        approver = getattr(context, "request_approval", None)
+        if approver is None:
+            metadata["approval_granted"] = False
+            metadata["approval_error"] = "no approval callback configured"
+            return False, metadata
+
+        try:
+            try:
+                result = approver(tool_name=tool.name, command=None, paths=list(paths))
+            except TypeError:
+                result = approver(tool_name=tool.name, command=None)
+        except Exception as exc:
+            metadata["approval_granted"] = False
+            metadata["approval_error"] = str(exc)
+            return False, metadata
+
+        resolved = self._resolve_awaitable(result)
+        approved = bool(resolved)
+        metadata["approval_granted"] = approved
+        return approved, metadata
+
+    @staticmethod
+    def _resolve_awaitable(result: Any) -> Any:
+        if not inspect.isawaitable(result):
+            return result
+        try:
+            return asyncio.run(result)
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            try:
+                asyncio.set_event_loop(loop)
+                return loop.run_until_complete(result)
+            finally:
+                asyncio.set_event_loop(None)
+                loop.close()
 
 
 def _jsonable(value: Any) -> Any:

@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional
 
 from pydantic import ValidationError
 
+from tools.handler import ToolOutput
 from tools.output import ExecOutput, format_exec_output
 from tools.schemas import RunTerminalCmdInput
 
@@ -85,7 +86,7 @@ def _run_foreground(
     shell_executable: str,
     timeout: Optional[float],
     stdin_data: Optional[str],
-) -> str:
+) -> ExecOutput:
     # Best-effort to avoid paging: append '| cat' if command likely to use a pager and not already piped
     likely_pages = ["git log", "man ", "less", "more "]
     if not any(tok in command for tok in ["|", ">", "2>"]) and any(p in command for p in likely_pages):
@@ -108,22 +109,20 @@ def _run_foreground(
             input=stdin_data,
         )
         duration = time.time() - start
-        exec_output = ExecOutput(
+        return ExecOutput(
             exit_code=completed.returncode,
             duration_seconds=duration,
             output=(completed.stdout or "") + (completed.stderr or ""),
             timed_out=False,
         )
-        return format_exec_output(exec_output)
     except subprocess.TimeoutExpired as exc:
         duration = time.time() - start
-        exec_output = ExecOutput(
+        return ExecOutput(
             exit_code=-1,
             duration_seconds=duration,
             output=(exc.stdout or "") + (exc.stderr or ""),
             timed_out=True,
         )
-        return format_exec_output(exec_output)
 
 
 def _run_background(
@@ -132,7 +131,7 @@ def _run_background(
     cwd: Optional[str],
     env: Optional[Dict[str, str]],
     shell_executable: str,
-) -> str:
+) -> ExecOutput:
     _ensure_log_dir()
     ts = time.strftime("%Y%m%d-%H%M%S")
     job_id = f"job-{ts}-{uuid.uuid4().hex[:8]}"
@@ -169,16 +168,15 @@ def _run_background(
         f"stderr_log: {stderr_path}",
         "hint: tail -f <log-path>",
     ]
-    exec_output = ExecOutput(
+    return ExecOutput(
         exit_code=0,
         duration_seconds=0.0,
         output="\n".join(summary_lines) + "\n",
         timed_out=False,
     )
-    return format_exec_output(exec_output)
 
 
-def run_terminal_cmd_impl(input: Dict[str, Any]) -> str:
+def run_terminal_cmd_impl(input: Dict[str, Any]) -> ToolOutput:
     try:
         params = RunTerminalCmdInput(**input)
     except ValidationError as exc:
@@ -211,26 +209,41 @@ def run_terminal_cmd_impl(input: Dict[str, Any]) -> str:
             first_bin = shlex.split(command)[0]
             base = os.path.basename(first_bin)
             if base in interactive_bins:
-                return json.dumps({
-                    "ok": False,
-                    "error": f"Refusing to run interactive program '{base}' in foreground; set is_background=true or choose a non-interactive flag.",
-                })
+                return ToolOutput(
+                    content=json.dumps({
+                        "ok": False,
+                        "error": f"Refusing to run interactive program '{base}' in foreground; set is_background=true or choose a non-interactive flag.",
+                    }),
+                    success=False,
+                )
         except Exception:
             pass
 
     if is_background:
-        return _run_background(
+        exec_output = _run_background(
             command,
             cwd=cwd,
             env=env_overrides,
             shell_executable=shell_executable,
         )
+    else:
+        exec_output = _run_foreground(
+            command,
+            cwd=cwd,
+            env=env_overrides,
+            shell_executable=shell_executable,
+            timeout=timeout_val,
+            stdin_data=stdin_data,
+        )
 
-    return _run_foreground(
-        command,
-        cwd=cwd,
-        env=env_overrides,
-        shell_executable=shell_executable,
-        timeout=timeout_val,
-        stdin_data=stdin_data,
+    formatted = format_exec_output(exec_output)
+    metadata: Dict[str, Any] = {}
+    if exec_output.truncated:
+        metadata["truncated"] = True
+    if exec_output.timed_out:
+        metadata["timed_out"] = True
+    return ToolOutput(
+        content=formatted,
+        success=True,
+        metadata=metadata or None,
     )

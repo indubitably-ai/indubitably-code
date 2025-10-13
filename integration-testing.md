@@ -51,7 +51,7 @@ and external MCP interactions.
   2. Dry-run leaves audit entry marked `skipped`, file unchanged.
   3. Error path stops the runner when `exit_on_tool_error=True`.
 - **Artifacts**: inspect `AgentRunResult`, audit JSONL, and telemetry counters.
-- **Current coverage**: `tests/integration/test_agent_runner_integration.py` verifies a write tool mutating the workspace, confirms parallel read-only execution, and asserts dry-run audit logging. Handling of fatal tool errors and `exit_on_tool_error` remains TODO.
+- **Current coverage**: `tests/integration/test_agent_runner_integration.py` verifies a write tool mutating the workspace, confirms parallel read-only execution, covers dry-run audit logging, and asserts state/telemetry cleanup after a mid-turn tool failure. Handling of fatal tool errors and `exit_on_tool_error` remains TODO.
 
 ### 3.3 Tool Execution & Validation
 - Cover each built-in tool category with integration-level assertions:
@@ -75,8 +75,8 @@ and external MCP interactions.
 - With approval policy combos (`never`, `on_write`, `always`) ensure agent prompts for approval, denies if callback returns False.
 - Sandbox enforcement: strict mode blocks disallowed commands; restricted mode allows safe commands but blocks writes outside allowed paths.
 - Confirm `ToolOutput` metadata contains `error_type` and audit logs show policy reason.
-- Current coverage: `tests/integration/test_policies_integration.py` verifies `run_terminal_cmd` approval gating, command blocking, and sandbox path enforcement.
-- Missing pieces: `on_write` approval flow, policy-driven audit log entries, and Seatbelt/Landlock platform hooks.
+- Current coverage: `tests/integration/test_policies_integration.py` verifies `run_terminal_cmd` approval gating, command blocking, sandbox path enforcement, and `on_write` write-tool approvals with audit metadata.
+- Missing pieces: Seatbelt/Landlock platform hooks, explicit decline-path assertions, and telemetry counters for policy prompts.
 
 ### 3.6 MCP Integration & Pooling
 - **Stubbed MCP**: using `mcp_stub_server` verify:
@@ -91,8 +91,8 @@ and external MCP interactions.
 ### 3.7 Telemetry & OTEL Export
 - Record real tool invocations and ensure `SessionTelemetry` counters update (`tokens_used`, `mcp_fetches`, etc.).
 - Use `TelemetrySink` (see `tests/integration/helpers/telemetry.py`) to assert OTEL payload contains resource attributes and correct tool metrics.
-- Current coverage: `tests/integration/test_telemetry_integration.py` validates telemetry events, OTEL export, and sink capture during a `read_file` turn.
-- Missing pieces: telemetry for error/fatal tool events, parallel batch metrics, truncated-output flags, and policy/Sandbox counters.
+- Current coverage: `tests/integration/test_telemetry_integration.py` validates telemetry events, OTEL export, and sink capture during a `read_file` turn; truncation flags are covered via `tests/integration/test_output_truncation_integration.py`.
+- Missing pieces: telemetry for error/fatal tool events, parallel batch metrics, policy/Sandbox counters, and MCP fetch failures.
 
 ### 3.8 Error Handling & Recovery
 - Simulate `RateLimitError` from the anthropic client: runner retries with backoff, logs message.
@@ -107,10 +107,11 @@ and external MCP interactions.
 - **Current coverage**: `tests/integration/test_turn_diff_integration.py` verifies edit tracking and undo via `apply_patch`.
 
 ### 3.10 Output Truncation & Large Payloads
-- Execute commands that exceed truncation thresholds (e.g., long `run_terminal_cmd` output) and assert head/tail formatting plus metadata (`timed_out`, `omitted`).
+- Execute commands that exceed truncation thresholds (e.g., long `run_terminal_cmd` output) and assert head/tail formatting plus metadata (`timed_out`, `omitted`, `truncated`).
 - Ensure truncated outputs still stream fully to the user transcript while the model receives the compact form.
-- Validate telemetry/log entries include truncation markers.
-- **Current coverage**: `tests/integration/test_output_truncation_integration.py` exercises foreground truncation metadata.
+- Validate telemetry/log entries include truncation markers for both truncated and non-truncated outputs.
+- **Current coverage**: `tests/integration/test_output_truncation_integration.py` exercises foreground truncation and telemetry metadata; background execution telemetry lives in `tests/integration/test_tool_execution_integration.py`.
+- Missing pieces: background truncation scenarios (e.g., large detached logs) and REPL streaming assertions.
 
 ### 3.11 Context Compaction & Pins
 - Force compaction by driving history over token thresholds, assert summaries are produced, pins preserved, and `/compact` reporting matches architecture expectations.
@@ -136,21 +137,22 @@ and external MCP interactions.
 | Suite | Key Files | Status |
 |-------|-----------|--------|
 | CLI/REPL smoke | `tests/integration/test_cli_repl_integration.py` | partial coverage (status/pin/compact); TODO Ctrl+C handling |
-| Headless Agent | `tests/integration/test_agent_runner_integration.py` | partial coverage (write + dry-run + parallel); TODO fatal tool errors, `exit_on_tool_error` |
+| Headless Agent | `tests/integration/test_agent_runner_integration.py` | partial coverage (write, dry-run, parallel, mid-turn failure cleanup); TODO fatal tool errors, `exit_on_tool_error` |
 | Tool categories | `tests/integration/test_tool_execution_integration.py`, `tests/integration/test_web_search_integration.py` | partial coverage (read/list/grep/apply_patch/glob/background & timeout/web search); TODO validation errors |
 | Parallel execution | `tests/integration/test_agent_runner_integration.py` | partial coverage (read/read overlap + read→write serialization); TODO interrupt handling |
-| Policy enforcement | `tests/integration/test_policies_integration.py` | partial coverage (approval always + blocked commands + sandbox paths); TODO on_write approvals, audit hooks |
+| Policy enforcement | `tests/integration/test_policies_integration.py` | partial coverage (approval always/on_write, blocked commands, sandbox paths); TODO Seatbelt/Landlock hooks, declined approvals, telemetry counters |
 | MCP pooling | `tests/integration/test_mcp_pooling_integration.py` | partial coverage (stubbed discovery/calls); TODO error handling, live smoke |
-| Telemetry export | `tests/integration/test_telemetry_integration.py` | partial coverage (success + blocked-command error); TODO fatal tool metrics, truncation flags |
+| Telemetry export | `tests/integration/test_telemetry_integration.py` | partial coverage (success + blocked-command error + truncation flags); TODO fatal tool metrics, parallel batch counters, policy prompts |
 | Error/Recovery | `tests/integration/test_error_recovery_integration.py`, `tests/integration/test_rate_limit_integration.py` | partial coverage (fatal tool stop + rate-limit retries); TODO cleanup on exceptions |
 | Turn diff & undo | `tests/integration/test_turn_diff_integration.py` | partial coverage (apply_patch + undo); TODO multi-file, conflict detection |
-| Output truncation | `tests/integration/test_output_truncation_integration.py` | partial coverage (foreground truncation); TODO telemetry markers, background truncation |
+| Output truncation | `tests/integration/test_output_truncation_integration.py` | partial coverage (foreground truncation + telemetry markers); TODO background truncation cases, REPL streaming validation |
 | Compaction & pins | `tests/integration/test_compaction_integration.py` | partial coverage (pin add/compact); TODO TTL expiry, token-threshold compaction |
 | Live MCP smoke | `tests/integration/test_mcp_live.py` (slow) | optional |
 
 ## 6. Next Steps
-1. Integrate the new helpers (`repl_driver`, `mcp_stub_server`, `TelemetrySink`) into forthcoming suites and harden their APIs as coverage grows.
-2. Backfill missing scenarios in existing suites (approval `on_write`, runner fatal cleanup, background truncation telemetry, Ctrl+C handling).
-3. Stand up remaining suites for live MCP smoke and telemetry truncation flags per the coverage matrix.
-4. Wire slow/optional suites (live MCP smoke, load/chaos hooks) behind pytest markers so CI can selectively enable them.
-5. Capture run commands and marker guidance in `docs/testing.md`, linking back to this plan for status tracking.
+1. **REPL resilience**: extend `test_repl_interrupt_integration.py` (or new suite) to simulate SIGINT/Ctrl+C, asserting graceful shutdown, session cleanup, and telemetry counters.
+2. **Policy depth**: add Seatbelt/Landlock approval fixtures, cover user-declined approvals, and ensure policy prompts increment telemetry counters.
+3. **Telemetry completeness**: capture fatal tool metrics, parallel batch stats, and policy prompt counters across `test_telemetry_integration.py` and headless-runner suites.
+4. **Truncation edge cases**: exercise background commands that exceed truncation thresholds and verify REPL transcript handling alongside telemetry flags.
+5. **MCP live smoke**: stand up gated tests against a real MCP server (Chrome DevTools) covering discovery, retries, and pooled client recycling.
+6. **Documentation & markers**: update `docs/testing.md` with marker guidance (`slow`, `mcp_live`) and command recipes for optional suites.

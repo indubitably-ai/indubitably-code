@@ -33,9 +33,18 @@ def test_run_terminal_cmd_output_truncation(integration_workspace) -> None:
 
     result = runner.run("Produce long output")
 
-    body = json.loads(result.tool_events[0].result)
+    assert result.tool_events, "expected tool event from command"
+    event = result.tool_events[0]
+    body = json.loads(event.result)
     assert "omitted" in body["output"]
     assert body["metadata"]["timed_out"] is False
+    assert body["metadata"]["truncated"] is True
+    assert event.metadata.get("truncated") is True
+
+    assert runner.context is not None
+    telemetry = runner.context.telemetry
+    assert telemetry.tool_executions, "expected telemetry records"
+    assert telemetry.tool_executions[0].truncated is True
 def _build_shell_tool() -> Tool:
     definition = run_terminal_cmd_tool_def()
     return Tool(

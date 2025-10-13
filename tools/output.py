@@ -20,6 +20,7 @@ class ExecOutput:
     duration_seconds: float
     output: str
     timed_out: bool = False
+    truncated: bool = False
 
 
 def format_exec_output(output: ExecOutput) -> str:
@@ -34,9 +35,11 @@ def format_exec_output(output: ExecOutput) -> str:
     total_lines = len(lines)
 
     if _within_limits(content, total_lines):
+        output.truncated = False
         return _format_output_json(output, content)
 
     truncated = _truncate_head_tail(content, lines, total_lines)
+    output.truncated = True
     summary = f"Total output lines: {total_lines}\n\n{truncated}"
     return _format_output_json(output, summary)
 
@@ -102,6 +105,7 @@ def _format_output_json(output: ExecOutput, content: str) -> str:
             "exit_code": output.exit_code,
             "duration_seconds": round(output.duration_seconds, 1),
             "timed_out": output.timed_out,
+            "truncated": output.truncated,
         },
     }
     return json.dumps(payload, ensure_ascii=False)

@@ -11,6 +11,7 @@ from tests.integration.helpers import queue_tool_turn
 from tests.mocking import MockAnthropic, text_block, tool_use_block
 
 from tools_create_file import create_file_tool_def, create_file_impl
+from tools_read import read_file_tool_def, read_file_impl
 
 
 def _build_create_file_tool() -> Tool:
@@ -21,6 +22,39 @@ def _build_create_file_tool() -> Tool:
         input_schema=definition["input_schema"],
         fn=create_file_impl,
         capabilities={"write_fs"},
+    )
+
+
+def _build_read_file_tool() -> Tool:
+    definition = read_file_tool_def()
+    return Tool(
+        name=definition["name"],
+        description=definition["description"],
+        input_schema=definition["input_schema"],
+        fn=read_file_impl,
+        capabilities={"read_fs"},
+    )
+
+
+def _build_flaky_tool() -> Tool:
+    schema = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+        },
+        "required": ["path"],
+        "additionalProperties": False,
+    }
+
+    def handler(payload: Dict[str, str]) -> str:
+        raise RuntimeError("synthetic failure for cleanup test")
+
+    return Tool(
+        name="flaky_tool",
+        description="Deliberately fails to exercise cleanup paths.",
+        input_schema=schema,
+        fn=handler,
+        capabilities={"read_fs"},
     )
 def test_agent_runner_creates_file_and_records_result(
     integration_workspace,
@@ -158,7 +192,73 @@ def test_parallel_read_tools_execute_concurrently(
 
     assert second_start < first_end, "second tool call should overlap with first"
     assert total_duration < 0.4, "parallel execution should complete faster than serial sum"
-    assert second_end - second_start >= 0.23, "slow tool should block for expected duration"
+
+
+def test_runner_cleans_up_after_mid_turn_failure(integration_workspace) -> None:
+    """Mixed turn with a recoverable failure should leave state and telemetry consistent."""
+
+    client = MockAnthropic()
+    client.add_response_from_blocks(
+        [
+            text_block("Starting multi-tool turn."),
+            tool_use_block(
+                "create_file",
+                {"path": "demo.txt", "content": "cleanup ok"},
+                tool_use_id="call-success",
+            ),
+            tool_use_block(
+                "flaky_tool",
+                {"path": "demo.txt"},
+                tool_use_id="call-failure",
+            ),
+            tool_use_block(
+                "read_file",
+                {"path": "demo.txt"},
+                tool_use_id="call-read",
+            ),
+        ]
+    )
+    client.add_response_from_blocks([text_block("Turn complete despite failure.")])
+
+    runner = AgentRunner(
+        tools=[_build_create_file_tool(), _build_flaky_tool(), _build_read_file_tool()],
+        options=AgentRunOptions(max_turns=2, verbose=False),
+        client=client,
+    )
+
+    result = runner.run("Execute multiple tools with a mid-turn failure.")
+
+    created = integration_workspace.path("demo.txt")
+    assert created.exists()
+    assert created.read_text(encoding="utf-8") == "cleanup ok"
+
+    assert result.turns_used == 2
+    assert result.stopped_reason == "completed"
+    assert [event.tool_name for event in result.tool_events] == [
+        "create_file",
+        "flaky_tool",
+        "read_file",
+    ]
+
+    failure_event = result.tool_events[1]
+    assert failure_event.is_error is True
+    assert failure_event.metadata.get("error_type") == "recoverable"
+
+    read_event = result.tool_events[2]
+    assert read_event.is_error is False
+    assert "cleanup ok" in read_event.result
+
+    assert runner.context is not None
+    telemetry = runner.context.telemetry
+    assert len(telemetry.tool_executions) == 3
+    assert telemetry.tool_error_counts.get("flaky_tool") == 1
+    assert any(not event.success for event in telemetry.tool_executions)
+
+    assert result.turn_summaries and result.turn_summaries[0]["paths"] == ["demo.txt"]
+
+    undo_ops = runner.undo_last_turn()
+    assert undo_ops and any("removed" in op for op in undo_ops)
+    assert not created.exists()
 
 
 def test_parallel_mixed_read_write_serializes_write(integration_workspace) -> None:

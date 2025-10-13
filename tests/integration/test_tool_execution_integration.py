@@ -195,6 +195,7 @@ def test_run_terminal_cmd_background_creates_logs(integration_workspace) -> None
     event = result.tool_events[0]
     body = json.loads(event.result)
     assert body["metadata"]["timed_out"] is False
+    assert not event.metadata.get("truncated", False)
     summary = body["output"].splitlines()
     assert any(line.startswith("background command dispatched") for line in summary)
 
@@ -220,6 +221,11 @@ def test_run_terminal_cmd_background_creates_logs(integration_workspace) -> None
         time.sleep(0.025)
 
     assert "integration background" in stdout_path.read_text(encoding="utf-8")
+
+    assert runner.context is not None
+    telemetry = runner.context.telemetry
+    assert telemetry.tool_executions, "expected telemetry events"
+    assert telemetry.tool_executions[0].truncated is False
 
 
 def test_run_terminal_cmd_foreground_timeout_enforced(integration_workspace) -> None:

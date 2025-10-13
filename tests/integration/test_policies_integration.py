@@ -9,6 +9,7 @@ from session import ContextSession, SessionSettings
 from tests.integration.helpers import queue_tool_turn
 from tests.mocking import MockAnthropic
 
+from tools_create_file import create_file_tool_def, create_file_impl
 from tools_run_terminal_cmd import run_terminal_cmd_tool_def, run_terminal_cmd_impl
 
 
@@ -20,6 +21,17 @@ def _build_shell_tool() -> Tool:
         input_schema=definition["input_schema"],
         fn=run_terminal_cmd_impl,
         capabilities={"exec_shell"},
+    )
+
+
+def _build_create_file_tool() -> Tool:
+    definition = create_file_tool_def()
+    return Tool(
+        name=definition["name"],
+        description=definition["description"],
+        input_schema=definition["input_schema"],
+        fn=create_file_impl,
+        capabilities={"write_fs"},
     )
 
 
@@ -94,6 +106,68 @@ def test_shell_command_requires_approval(integration_workspace, monkeypatch) -> 
     assert approvals == [("run_terminal_cmd", "echo approved")]
     output = json.loads(result.tool_events[0].result)
     assert "approved" in output.get("output", "")
+
+
+def test_write_tool_requires_approval_on_write_policy(integration_workspace, monkeypatch) -> None:
+    """Write-capable tools should request approval under on_write policy and log metadata."""
+
+    approvals = []
+
+    def approval_stub(
+        self,
+        *,
+        tool_name: str,
+        command: str | None = None,
+        paths: list[str] | None = None,
+    ) -> bool:
+        approvals.append({"tool": tool_name, "command": command, "paths": paths})
+        return True
+
+    monkeypatch.setattr(ContextSession, "request_approval", approval_stub, raising=False)
+
+    audit_path = integration_workspace.path("audit.jsonl")
+
+    settings = SessionSettings().update_with(**{"execution.approval": "on_write"})
+
+    client = MockAnthropic()
+    queue_tool_turn(
+        client,
+        tool_name="create_file",
+        payloads=[{"path": "notes.txt", "content": "approved"}],
+        final_text="Created notes.txt with approval.",
+        preamble_text="Requesting approval to write notes.txt.",
+    )
+
+    runner = AgentRunner(
+        tools=[_build_create_file_tool()],
+        options=AgentRunOptions(max_turns=2, verbose=False, audit_log_path=audit_path),
+        client=client,
+        session_settings=settings,
+    )
+
+    result = runner.run("Create notes.txt containing 'approved'.")
+
+    created = integration_workspace.path("notes.txt")
+    assert created.exists()
+    assert created.read_text(encoding="utf-8") == "approved"
+
+    assert approvals and approvals[0]["tool"] == "create_file"
+    assert approvals[0]["paths"] == ["notes.txt"]
+
+    assert result.tool_events, "expected tool event for create_file"
+    event_metadata = result.tool_events[0].metadata
+    assert event_metadata.get("approval_required") is True
+    assert event_metadata.get("approval_granted") is True
+    assert event_metadata.get("approval_policy") == "on_write"
+
+    audit_lines = audit_path.read_text(encoding="utf-8").strip().splitlines()
+    assert audit_lines, "expected audit log entry"
+    audit_event = json.loads(audit_lines[0])
+    metadata = audit_event.get("metadata", {})
+    assert metadata.get("approval_required") is True
+    assert metadata.get("approval_granted") is True
+    assert metadata.get("approval_policy") == "on_write"
+    assert metadata.get("approval_paths") == ["notes.txt"]
 
 
 def test_shell_write_blocked_outside_allowed_path(integration_workspace) -> None:

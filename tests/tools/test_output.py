@@ -14,6 +14,7 @@ def test_format_exec_output_returns_full_output_when_within_limits():
     assert result["output"] == "hello\n"
     assert result["metadata"]["exit_code"] == 0
     assert result["metadata"]["timed_out"] is False
+    assert result["metadata"]["truncated"] is False
 
 
 def test_format_exec_output_truncates_and_marks_large_output():
@@ -25,6 +26,7 @@ def test_format_exec_output_truncates_and_marks_large_output():
     assert "Total output lines: 1000" in result["output"]
     assert "[... omitted" in result["output"]
     assert len(result["output"].encode("utf-8")) <= MODEL_FORMAT_MAX_BYTES
+    assert result["metadata"]["truncated"] is True
 
 
 def test_format_exec_output_marks_timeouts():
@@ -34,3 +36,4 @@ def test_format_exec_output_marks_timeouts():
     assert result["metadata"]["timed_out"] is True
     assert result["metadata"]["exit_code"] == -1
     assert result["output"].startswith("command timed out after 5.2")
+    assert result["metadata"]["truncated"] is False
