@@ -124,10 +124,49 @@ class ContextSession:
         return record
 
     def add_tool_results(self, tool_blocks: List[Dict[str, Any]], *, dedupe: bool = True) -> Optional[MessageRecord]:
-        payload = str(tool_blocks)
+        # Sanitize tool_result blocks to match Anthropic schema and avoid unsupported fields.
+        # Preserve any extra metadata on the MessageRecord.metadata to retain observability.
+        allowed_keys = {"type", "tool_use_id", "content", "is_error"}
+        sanitized_blocks: List[Dict[str, Any]] = []
+        per_block_metadata: List[Dict[str, Any]] = []
+
+        for block in tool_blocks:
+            btype = block.get("type")
+            if btype == "tool_result":
+                # Capture extra metadata before stripping
+                extra: Dict[str, Any] = {}
+                if isinstance(block, dict):
+                    # Common extras we previously attached
+                    if "metadata" in block and isinstance(block["metadata"], dict):
+                        extra["metadata"] = dict(block["metadata"])  # shallow copy
+                    if "error_type" in block:
+                        extra["error_type"] = block["error_type"]
+                    # Capture any other unexpected keys for diagnostics
+                    for k, v in block.items():
+                        if k not in allowed_keys and k not in ("metadata", "error_type"):
+                            extra.setdefault("extras", {})[k] = v
+
+                # Build sanitized block with only allowed keys; coerce content to string
+                sanitized: Dict[str, Any] = {
+                    "type": "tool_result",
+                    "tool_use_id": block.get("tool_use_id", ""),
+                    "content": str(block.get("content", "")),
+                    "is_error": bool(block.get("is_error", False)),
+                }
+                sanitized_blocks.append(sanitized)
+                per_block_metadata.append(extra)
+            else:
+                # Non tool_result blocks are passed through as-is
+                sanitized_blocks.append(block)
+                per_block_metadata.append({})
+
+        payload = str(sanitized_blocks)
         if dedupe and self.history.has_tool_hash(payload):
             return None
-        record = self.history.register_tool_results(tool_blocks, priority=1)
+        record = self.history.register_tool_results(sanitized_blocks, priority=1)
+        # Attach preserved metadata for downstream consumers (not sent to Anthropic)
+        if any(per_block_metadata):
+            record.metadata["tool_results_meta"] = per_block_metadata
         self.history.register_tool_hash(payload, record)
         self._after_change()
         return record
