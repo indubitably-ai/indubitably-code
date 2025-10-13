@@ -39,7 +39,7 @@ class ShellHandler(ToolHandler):
         try:
             arguments = validate_tool_input(self._tool.name, payload.arguments)
         except ValueError as exc:
-            return ToolOutput(content=str(exc), success=False)
+            return ToolOutput(content=str(exc), success=False, metadata={"error_type": "validation"})
 
         command = str(arguments.get("command", "")).strip()
         exec_context = self._resolve_exec_context(invocation)

@@ -38,7 +38,7 @@ class FunctionToolHandler(ToolHandler):
         try:
             arguments = validate_tool_input(self._tool.name, invocation.payload.arguments)
         except ValueError as exc:
-            return ToolOutput(content=str(exc), success=False)
+            return ToolOutput(content=str(exc), success=False, metadata={"error_type": "validation"})
 
         def _call() -> Any:
             if invocation.tracker is not None and self._accepts_tracker:

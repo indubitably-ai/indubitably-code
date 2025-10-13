@@ -1,6 +1,6 @@
 ## Indubitably Code
 
-Anthropic’s local agent harness for rapid tool experimentation, policy validation, and workflow
+Our local agent harness for rapid tool experimentation, policy validation, and workflow
 automation. This repository packages a production-inspired conversation loop with a fully managed
 toolbelt, approval policies, telemetry, and integration-test scaffolding so you can iterate on
 autonomous coding flows with confidence.

@@ -513,15 +513,18 @@ def run_agent(
                     transcript_label = "ERROR" if is_error else "RESULT"
                     _print_transcript(transcript_path, f"TOOL {tool_name} {transcript_label}: {result_str}")
 
-                    tool_block = context.build_tool_result_block(
-                        call.call_id,
-                        result_str,
-                        is_error=is_error,
-                    )
+                    # Preserve preformatted tool result content/metadata as provided by runtime
+                    tool_block = {
+                        "type": "tool_result",
+                        "tool_use_id": call.call_id,
+                        "content": result_str,
+                        "is_error": is_error,
+                    }
                     metadata = result.get("metadata")
                     if metadata:
-                        tool_block["metadata"] = metadata
-                        tool_block["error_type"] = metadata.get("error_type")
+                        tool_block["metadata"] = dict(metadata)
+                        if "error_type" in metadata and metadata["error_type"]:
+                            tool_block["error_type"] = metadata["error_type"]
                     context.add_tool_results([tool_block], dedupe=False)
 
                     _record_tool_debug_event(
