@@ -493,6 +493,13 @@ def run_agent(
 
             if pending_calls:
                 async def _run_pending() -> List[Dict[str, Any]]:
+                    # Telemetry: record size of this parallel batch
+                    try:
+                        if hasattr(context, "telemetry"):
+                            context.telemetry.incr("parallel_batches", 1)
+                            context.telemetry.incr("parallel_batch_tools_total", len(pending_calls))
+                    except Exception:
+                        pass
                     tasks = [
                         tool_runtime.execute_tool_call(
                             session=context,

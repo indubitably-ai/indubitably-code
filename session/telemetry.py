@@ -24,6 +24,9 @@ class ToolExecutionEvent:
     input_size: int = 0
     output_size: int = 0
     truncated: bool = False
+    error_type: Optional[str] = None
+    message: Optional[str] = None
+    error_summary: Optional[str] = None
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -37,6 +40,9 @@ class ToolExecutionEvent:
             "input_size": self.input_size,
             "output_size": self.output_size,
             "truncated": self.truncated,
+            "error_type": self.error_type,
+            "message": self.message,
+            "error_summary": self.error_summary,
         }
 
 
@@ -49,6 +55,13 @@ class SessionTelemetry:
         "summarizer_calls": 0,
         "pins_size": 0,
         "mcp_fetches": 0,
+        # Policy/approval counters
+        "policy_prompts": 0,
+        "policy_approved": 0,
+        "policy_denied": 0,
+        # Parallel execution counters
+        "parallel_batches": 0,
+        "parallel_batch_tools_total": 0,
     })
     tool_executions: List[ToolExecutionEvent] = field(default_factory=list)
     tool_execution_times: Dict[str, List[float]] = field(default_factory=dict)
@@ -76,6 +89,7 @@ class SessionTelemetry:
         input_size: int = 0,
         output_size: int = 0,
         truncated: bool = False,
+        error_type: Optional[str] = None,
     ) -> None:
         event = ToolExecutionEvent(
             tool_name=tool_name,
@@ -88,6 +102,7 @@ class SessionTelemetry:
             input_size=input_size,
             output_size=output_size,
             truncated=truncated,
+            error_type=error_type,
         )
         self.tool_executions.append(event)
         self.tool_execution_times.setdefault(tool_name, []).append(duration)
@@ -126,6 +141,9 @@ class SessionTelemetry:
                     "tool.input_bytes": event.input_size,
                     "tool.output_bytes": event.output_size,
                     "tool.truncated": event.truncated,
+                    "tool.error_type": event.error_type,
+                    "tool.message": event.message,
+                    "tool.error_summary": event.error_summary,
                 },
             }
 

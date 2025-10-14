@@ -1,0 +1,25 @@
+receivers:
+  filelog:
+    include:
+      - /data/events.jsonl
+    start_at: beginning
+    operators:
+      - type: json_parser
+        parse_from: body
+      # keep entire JSON as-is (resource{}, events[])
+
+processors:
+  batch: {}
+
+exporters:
+  loki:
+    endpoint: http://loki:3100/loki/api/v1/push
+    # minimal config; rely on default labels
+
+service:
+  pipelines:
+    logs:
+      receivers: [filelog]
+      processors: [batch]
+      exporters: [loki]
+
