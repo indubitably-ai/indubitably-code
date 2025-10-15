@@ -32,26 +32,37 @@ class OtelExporter:
         self._buffer: list[str] = []
 
     def export(self, events: Iterable[Mapping[str, object]]) -> None:
-        """Serialize *events* and write them to the configured sink."""
+        """Serialize events and write ONE JSON line per event.
 
-        payload = {
-            "resource": dict(self._resource),
-            "events": list(events),
-        }
-        serialized = json.dumps(payload, ensure_ascii=False)
+        The line format is:
+        {"resource": {"service.name": "..."}, "event": { ...single event... }}
+        """
+
+        # Serialize each event on its own line for robust downstream processing
+        lines: list[str] = []
+        resource = dict(self._resource)
+        for event in events:
+            line = json.dumps({"resource": resource, "event": event}, ensure_ascii=False)
+            lines.append(line)
+
+        if not lines:
+            return
+
         if self._sink is not None:
             with self._lock:
-                self._sink.write(serialized + "\n")
+                for line in lines:
+                    self._sink.write(line + "\n")
                 self._sink.flush()
             return
         if self._path is not None:
             with self._lock:
                 self._path.parent.mkdir(parents=True, exist_ok=True)
                 with self._path.open("a", encoding="utf-8") as fh:
-                    fh.write(serialized + "\n")
+                    for line in lines:
+                        fh.write(line + "\n")
             return
         with self._lock:
-            self._buffer.append(serialized)
+            self._buffer.extend(lines)
 
     def buffered_payloads(self) -> list[str]:
         """Return any payloads retained in memory (used when no sink/path provided)."""

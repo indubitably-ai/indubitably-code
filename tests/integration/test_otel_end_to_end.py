@@ -65,13 +65,12 @@ def test_otel_export_writes_jsonl_end_to_end(integration_workspace) -> None:
     content = export_path.read_text(encoding="utf-8").strip()
     assert content, "expected non-empty OTEL export file"
 
-    # The exporter writes one JSON object per line
+    # The exporter now writes one event per line: {"resource": {...}, "event": {...}}
     first_line = content.splitlines()[0]
     payload = json.loads(first_line)
     assert payload["resource"]["service.name"] == "indubitably-agent-local"
-    events = payload.get("events") or []
-    assert events, "expected at least one event"
-    attrs = events[0].get("attributes") or {}
+    event = payload.get("event") or {}
+    attrs = event.get("attributes") or {}
     assert attrs.get("tool.name") == "read_file"
     assert attrs.get("tool.success") is True
     assert "tool.message" in attrs
