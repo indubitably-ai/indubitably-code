@@ -112,6 +112,7 @@ class SessionSettings:
             "mcp": self.mcp,
             "privacy": self.privacy,
             "execution": self.execution,
+            "telemetry": self.telemetry,
         }
         updated = dict(current)
         for dotted, raw_value in overrides.items():
