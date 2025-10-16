@@ -566,6 +566,25 @@ def run_agent(
     finally:
         listener.disarm()
         try:
+            # Flush telemetry to OTEL (JSONL) if export is enabled in session settings
+            try:
+                tel_cfg = getattr(context.settings, "telemetry", None)
+                if (
+                    tel_cfg is not None
+                    and getattr(tel_cfg, "enable_export", False)
+                    and getattr(tel_cfg, "export_path", None)
+                ):
+                    try:
+                        from session.otel import OtelExporter as _OtelExporter
+                        exporter = _OtelExporter(
+                            service_name=tel_cfg.service_name,
+                            path=tel_cfg.export_path,
+                        )
+                        context.telemetry.flush_to_otel(exporter)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             asyncio.run(context.close())
         except RuntimeError:
             loop = asyncio.new_event_loop()
