@@ -67,6 +67,7 @@ class SessionTelemetry:
     tool_execution_times: Dict[str, List[float]] = field(default_factory=dict)
     tool_error_counts: Dict[str, int] = field(default_factory=dict)
     parallel_tool_batches: int = 0
+    _flushed: bool = False
 
     def incr(self, key: str, amount: int = 1) -> None:
         self.counters[key] = self.counters.get(key, 0) + amount
@@ -153,8 +154,10 @@ class SessionTelemetry:
 
     def flush_to_otel(self, exporter: "OtelExporter") -> None:
         """Send recorded tool executions to the provided OTEL exporter."""
-
+        if self._flushed:
+            return
         exporter.export(self.iter_otel_events())
+        self._flushed = True
 
 
 __all__ = ["SessionTelemetry", "ToolExecutionEvent"]

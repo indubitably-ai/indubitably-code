@@ -1,0 +1,8 @@
+[telemetry]
+enable_export = true
+export_path = "run_artifacts/otel/events.jsonl"
+service_name = "indubitably-agent-local"
+
+[execution]
+# allow writing to repo root so the agent can create logs/review files
+allowed_paths = ["/Users/gp/src/indubitably-code"]

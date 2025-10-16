@@ -1,6 +1,7 @@
 """Interactive Anthropic agent with tool support for local development."""
 
 import asyncio
+import logging
 import os
 import select
 import sys
@@ -63,6 +64,7 @@ class Tool:
             "description": self.description,
             "input_schema": self.input_schema,
         }
+logger = logging.getLogger(__name__)
 
 
 class EscapeListener:
@@ -581,10 +583,10 @@ def run_agent(
                             path=tel_cfg.export_path,
                         )
                         context.telemetry.flush_to_otel(exporter)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+                    except Exception as exc:
+                        logger.debug("Telemetry export failed: %s", exc)
+            except Exception as exc:
+                logger.debug("Telemetry export configuration failed: %s", exc)
             asyncio.run(context.close())
         except RuntimeError:
             loop = asyncio.new_event_loop()

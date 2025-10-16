@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import inspect
 import json
 import sys
@@ -17,6 +18,7 @@ from agents_md import load_agents_md
 from config import load_anthropic_config
 from prompt import PromptPacker, PackedPrompt
 from session import ContextSession, SessionSettings, TurnDiffTracker, load_session_settings, MCPServerDefinition
+logger = logging.getLogger(__name__)
 from tools import (
     ConfiguredToolSpec,
     ToolCall,
@@ -429,10 +431,10 @@ class AgentRunner:
                     from session.otel import OtelExporter as _OtelExporter
                     exporter = _OtelExporter(service_name=tel_cfg.service_name, path=tel_cfg.export_path)
                     context.telemetry.flush_to_otel(exporter)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                except Exception as exc:
+                    logger.debug("Telemetry export failed: %s", exc)
+        except Exception as exc:
+            logger.debug("Telemetry export configuration failed: %s", exc)
 
         try:
             import asyncio as _asyncio  # local alias to avoid shadowing
