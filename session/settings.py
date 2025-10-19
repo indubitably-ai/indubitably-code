@@ -73,6 +73,15 @@ class PrivacySettings:
     redact_pii: bool = True
 
 
+@dataclass(frozen=True)
+class TelemetrySettings:
+    """Telemetry/export configuration (OTEL)."""
+
+    enable_export: bool = False
+    export_path: Optional[Path] = None
+    service_name: str = "indubitably-agent"
+
+
 
 @dataclass(frozen=True)
 class ExecutionPolicySettings:
@@ -91,6 +100,7 @@ class SessionSettings:
     mcp: MCPSettings = MCPSettings()
     privacy: PrivacySettings = PrivacySettings()
     execution: ExecutionPolicySettings = ExecutionPolicySettings()
+    telemetry: TelemetrySettings = TelemetrySettings()
 
     def update_with(self, **overrides: Any) -> "SessionSettings":
         """Return new settings with dotted overrides like 'compaction.keep_last_turns'."""
@@ -102,6 +112,7 @@ class SessionSettings:
             "mcp": self.mcp,
             "privacy": self.privacy,
             "execution": self.execution,
+            "telemetry": self.telemetry,
         }
         updated = dict(current)
         for dotted, raw_value in overrides.items():
@@ -243,6 +254,26 @@ def _settings_from_mapping(mapping: Mapping[str, Any], *, base_dir: Optional[Pat
             },
         )
 
+    telemetry = TelemetrySettings()
+    telemetry_section = mapping.get("telemetry")
+    if isinstance(telemetry_section, Mapping):
+        export_path_value = telemetry_section.get("export_path")
+        export_path: Optional[Path]
+        if export_path_value is None or str(export_path_value).strip() == "":
+            export_path = None
+        else:
+            p = Path(str(export_path_value)).expanduser()
+            export_path = p.resolve() if p.is_absolute() else (base_dir / p).resolve() if base_dir else p.resolve()
+
+        telemetry = _replace_dataclass(
+            telemetry,
+            {
+                "enable_export": bool(telemetry_section.get("enable_export", telemetry.enable_export)),
+                "export_path": export_path,
+                "service_name": str(telemetry_section.get("service_name", telemetry.service_name)),
+            },
+        )
+
     execution = ExecutionPolicySettings()
     execution_section = mapping.get("execution")
     if isinstance(execution_section, Mapping):
@@ -273,6 +304,7 @@ def _settings_from_mapping(mapping: Mapping[str, Any], *, base_dir: Optional[Pat
         mcp=mcp,
         privacy=privacy,
         execution=execution,
+        telemetry=telemetry,
     )
 
 

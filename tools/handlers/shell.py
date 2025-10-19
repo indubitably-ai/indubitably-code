@@ -45,12 +45,29 @@ class ShellHandler(ToolHandler):
         exec_context = self._resolve_exec_context(invocation)
         allowed, reason = exec_context.can_execute_command(command)
         if not allowed:
-            return ToolOutput(content=f"Command blocked by policy: {reason}", success=False)
+            return ToolOutput(
+                content=f"Command blocked by policy: {reason}",
+                success=False,
+                metadata={
+                    "error_type": "policy_denied",
+                    "sandbox_reason": reason,
+                    "command_preview": command.split()[0] if command else "",
+                },
+            )
 
         if exec_context.requires_approval(self._tool.name, is_write=False):
             approved = await self._request_approval(invocation, command)
             if not approved:
-                return ToolOutput(content="Command execution denied by policy", success=False)
+                return ToolOutput(
+                    content="Command execution denied by policy",
+                    success=False,
+                    metadata={
+                        "error_type": "policy_denied",
+                        "approval_required": True,
+                        "approval_granted": False,
+                        "command_preview": command.split()[0] if command else "",
+                    },
+                )
 
         timeout_limit = exec_context.timeout_seconds
         if timeout_limit is not None:
@@ -65,10 +82,14 @@ class ShellHandler(ToolHandler):
         try:
             result = await self._invoke_tool(arguments, invocation)
         except Exception as exc:  # pragma: no cover - defensive envelope
-            return ToolOutput(content=str(exc), success=False, metadata={"exception": repr(exc)})
+            return ToolOutput(content=str(exc), success=False, metadata={"exception": repr(exc), "command_preview": command.split()[0] if command else ""})
 
         if isinstance(result, ToolOutput):
-            return result
+            # preserve and enrich metadata with command preview
+            meta = dict(result.metadata or {})
+            if "command_preview" not in meta:
+                meta["command_preview"] = command.split()[0] if command else ""
+            return ToolOutput(content=result.content, success=result.success, metadata=meta)
         if isinstance(result, str):
             return ToolOutput(content=result, success=True)
         return ToolOutput(content=str(result), success=True)

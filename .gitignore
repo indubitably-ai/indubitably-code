@@ -14,3 +14,6 @@ wheels/
 
 # Local run outputs
 run_artifacts/
+
+# Local environment
+.env

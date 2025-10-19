@@ -74,13 +74,23 @@ class ToolHandler(Protocol):
 async def execute_handler(handler: ToolHandler, invocation: ToolInvocation) -> ToolOutput:
     """Execute a handler and record telemetry on the context if available."""
     start = time.time()
+    message: str | None = None
+    error_summary: str | None = None
     try:
         result = await handler.handle(invocation)
         success = result.success
         error: str | None = None
+        # Build message on success
+        duration_ms = (time.time() - start) * 1000.0
+        message = (
+            f"{invocation.tool_name} {'ok' if success else 'err'} in "
+            f"{int(duration_ms)}ms (turn {getattr(invocation.turn_context, 'turn_index', 0)}, "
+            f"call {invocation.call_id})"
+        )
     except ToolError as exc:
         success = False
         error = exc.message
+        error_summary = exc.message.split("\n", 1)[0]
         result = ToolOutput(
             content=exc.message,
             success=False,
@@ -89,6 +99,7 @@ async def execute_handler(handler: ToolHandler, invocation: ToolInvocation) -> T
     except Exception as exc:  # pragma: no cover - defensive envelope
         success = False
         error = str(exc)
+        error_summary = str(exc).split("\n", 1)[0]
         result = ToolOutput(
             content=f"tool execution failed: {exc}",
             success=False,
@@ -109,7 +120,19 @@ async def execute_handler(handler: ToolHandler, invocation: ToolInvocation) -> T
                     input_size=_estimate_payload_size(invocation.payload),
                     output_size=len((result.content or "").encode("utf-8")),
                     truncated=bool(result.metadata and result.metadata.get("truncated")),
+                    error_type=(result.metadata or {}).get("error_type"),
                 )
+                # attach a human-readable message and error_summary into last event
+                last = telemetry.tool_executions[-1]
+                if message is None:
+                    # build a message if it wasn't built yet
+                    message = (
+                        f"{invocation.tool_name} {'ok' if success else 'err'} in "
+                        f"{int(duration*1000)}ms (turn {last.turn}, call {invocation.call_id})"
+                    )
+                setattr(last, "message", message)  # type: ignore[attr-defined]
+                if error_summary:
+                    setattr(last, "error_summary", error_summary)  # type: ignore[attr-defined]
             except Exception:  # pragma: no cover - telemetry should not break tools
                 pass
 

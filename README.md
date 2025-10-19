@@ -135,6 +135,34 @@ to restrict shell commands and filesystem writes.
   `MODEL_FORMAT_MAX_BYTES`. Metadata now includes `truncated` so audits and telemetry can flag
   shortened outputs.
 
+### OTEL Export + Local UI
+
+To export events and view them in a local UI (Grafana):
+
+1) Enable export in your config (TOML):
+
+```toml
+[telemetry]
+enable_export = true
+export_path = "run_artifacts/otel/events.jsonl"
+service_name = "indubitably-agent-local"
+```
+
+2) Start the observability stack:
+
+```bash
+cd observability
+docker compose up -d
+```
+
+3) Open Grafana at http://localhost:3000 and query Loki in Explore:
+
+```
+{service_name="indubitably-agent-local"}
+```
+
+Collector config is in `observability/otel-collector.yaml` and tails the JSONL at `run_artifacts/otel/events.jsonl`.
+
 ---
 
 ## MCP Integration

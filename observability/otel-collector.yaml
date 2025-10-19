@@ -1,0 +1,38 @@
+receivers:
+  filelog:
+    include:
+      - /data/events.jsonl
+    start_at: beginning
+    # Parse JSONL into attributes and body for Loki labels and search
+    operators:
+      - type: json_parser
+        parse_from: body
+        parse_to: body
+      # Promote resource.service.name into an attribute for labeling/querying
+      - type: move
+        from: body.resource["service.name"]
+        to: attributes.service_name
+      # Optional: expose event.name as attribute
+      - type: move
+        from: body.event.name
+        to: attributes.event_name
+      # Flatten the event object back into the body for readable log lines
+      - type: move
+        from: body.event
+        to: body
+
+processors:
+  batch: {}
+
+exporters:
+  loki:
+    endpoint: http://loki:3100/loki/api/v1/push
+    # minimal config
+
+service:
+  pipelines:
+    logs:
+      receivers: [filelog]
+      processors: [batch]
+      exporters: [loki]
+

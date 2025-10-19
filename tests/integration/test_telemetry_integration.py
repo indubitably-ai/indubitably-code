@@ -74,6 +74,8 @@ def test_telemetry_records_tool_execution(integration_workspace) -> None:
     sink = TelemetrySink()
     telemetry.flush_to_otel(sink)
     assert sink.events and sink.events[0].attributes["tool.name"] == "read_file"
+    # New enriched fields
+    assert "tool.message" in sink.events[0].attributes
 
     # Tool event payload should still reflect success for completeness.
     tool_event = result.tool_events[0]

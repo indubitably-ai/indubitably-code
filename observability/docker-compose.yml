@@ -1,0 +1,45 @@
+version: "3.9"
+
+services:
+  loki:
+    image: grafana/loki:2.9.8
+    command: -config.file=/etc/loki/config.yml
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./loki/config.yml:/etc/loki/config.yml:ro
+      - loki-data:/loki
+
+  grafana:
+    image: grafana/grafana:10.4.5
+    ports:
+      - "3000:3000"
+    depends_on:
+      - loki
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_AUTH_BASIC_ENABLED=true
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_FEATURE_TOGGLES_ENABLE=publicDashboards
+    volumes:
+      - ./grafana/provisioning/:/etc/grafana/provisioning/:ro
+      - grafana-data:/var/lib/grafana
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.102.0
+    command: ["--config", "/etc/otelcol/otel-collector.yaml"]
+    depends_on:
+      - loki
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol/otel-collector.yaml:ro
+      # Map the agent's exported JSONL into the collector
+      - ../run_artifacts/otel/:/data/:ro
+
+volumes:
+  grafana-data: {}
+  loki-data: {}
+
+
+

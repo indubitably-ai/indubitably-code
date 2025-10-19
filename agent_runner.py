@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import inspect
 import json
 import sys
@@ -17,6 +18,7 @@ from agents_md import load_agents_md
 from config import load_anthropic_config
 from prompt import PromptPacker, PackedPrompt
 from session import ContextSession, SessionSettings, TurnDiffTracker, load_session_settings, MCPServerDefinition
+logger = logging.getLogger(__name__)
 from tools import (
     ConfiguredToolSpec,
     ToolCall,
@@ -410,7 +412,7 @@ class AgentRunner:
         final_response = "\n".join(txt for txt in text_outputs if txt).strip()
         conversation_payload = context.build_messages()
 
-        return AgentRunResult(
+        result = AgentRunResult(
             final_response=final_response,
             tool_events=self.tool_events,
             edited_files=sorted(self.edited_files),
@@ -419,6 +421,32 @@ class AgentRunner:
             conversation=conversation_payload,
             turn_summaries=self.turn_summaries,
         )
+
+        # Ensure session resources are closed and telemetry exports are flushed
+        try:
+            # Fallback flush in case session-managed exporter wasn't initialized
+            tel_cfg = self.session_settings.telemetry
+            if getattr(tel_cfg, "enable_export", False) and getattr(tel_cfg, "export_path", None):
+                try:
+                    from session.otel import OtelExporter as _OtelExporter
+                    exporter = _OtelExporter(service_name=tel_cfg.service_name, path=tel_cfg.export_path)
+                    context.telemetry.flush_to_otel(exporter)
+                except Exception as exc:
+                    logger.debug("Telemetry export failed: %s", exc)
+        except Exception as exc:
+            logger.debug("Telemetry export configuration failed: %s", exc)
+
+        try:
+            import asyncio as _asyncio  # local alias to avoid shadowing
+            _asyncio.run(context.close())
+        except RuntimeError:
+            loop = _asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(context.close())
+            finally:
+                loop.close()
+
+        return result
 
     def undo_last_turn(self) -> List[str]:
         if not self._turn_trackers:
