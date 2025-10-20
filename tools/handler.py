@@ -9,6 +9,7 @@ from typing import Any, Dict, Protocol
 
 from errors import ErrorType, ToolError
 from .payload import ToolPayload
+from .tool_summary import summarize_tool_call, truncate_text
 
 
 class ToolKind(Enum):
@@ -74,19 +75,14 @@ class ToolHandler(Protocol):
 async def execute_handler(handler: ToolHandler, invocation: ToolInvocation) -> ToolOutput:
     """Execute a handler and record telemetry on the context if available."""
     start = time.time()
-    message: str | None = None
     error_summary: str | None = None
+    request_summary = summarize_tool_call(invocation.tool_name, invocation.payload)
+    response_text: str = ""
     try:
         result = await handler.handle(invocation)
         success = result.success
         error: str | None = None
-        # Build message on success
-        duration_ms = (time.time() - start) * 1000.0
-        message = (
-            f"{invocation.tool_name} {'ok' if success else 'err'} in "
-            f"{int(duration_ms)}ms (turn {getattr(invocation.turn_context, 'turn_index', 0)}, "
-            f"call {invocation.call_id})"
-        )
+        response_text = result.content or ""
     except ToolError as exc:
         success = False
         error = exc.message
@@ -96,6 +92,7 @@ async def execute_handler(handler: ToolHandler, invocation: ToolInvocation) -> T
             success=False,
             metadata={"error_type": exc.error_type.value},
         )
+        response_text = result.content or ""
     except Exception as exc:  # pragma: no cover - defensive envelope
         success = False
         error = str(exc)
@@ -105,11 +102,15 @@ async def execute_handler(handler: ToolHandler, invocation: ToolInvocation) -> T
             success=False,
             metadata={"error_type": ErrorType.FATAL.value},
         )
+        response_text = result.content or ""
     finally:
         duration = time.time() - start
         telemetry = getattr(invocation.turn_context, "telemetry", None)
         if telemetry is not None:
             try:
+                response_preview = truncate_text(response_text, limit=160) if response_text else None
+                outcome = response_preview or ("ok" if success else "error")
+                message = f"{request_summary} -> {outcome} [{int(duration * 1000)}ms]"
                 telemetry.record_tool_execution(  # type: ignore[attr-defined]
                     tool_name=invocation.tool_name,
                     call_id=invocation.call_id,
@@ -121,18 +122,11 @@ async def execute_handler(handler: ToolHandler, invocation: ToolInvocation) -> T
                     output_size=len((result.content or "").encode("utf-8")),
                     truncated=bool(result.metadata and result.metadata.get("truncated")),
                     error_type=(result.metadata or {}).get("error_type"),
+                    message=message,
+                    error_summary=error_summary,
+                    request_summary=request_summary,
+                    response_preview=response_preview,
                 )
-                # attach a human-readable message and error_summary into last event
-                last = telemetry.tool_executions[-1]
-                if message is None:
-                    # build a message if it wasn't built yet
-                    message = (
-                        f"{invocation.tool_name} {'ok' if success else 'err'} in "
-                        f"{int(duration*1000)}ms (turn {last.turn}, call {invocation.call_id})"
-                    )
-                setattr(last, "message", message)  # type: ignore[attr-defined]
-                if error_summary:
-                    setattr(last, "error_summary", error_summary)  # type: ignore[attr-defined]
             except Exception:  # pragma: no cover - telemetry should not break tools
                 pass
 

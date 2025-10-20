@@ -27,6 +27,8 @@ class ToolExecutionEvent:
     error_type: Optional[str] = None
     message: Optional[str] = None
     error_summary: Optional[str] = None
+    request_summary: Optional[str] = None
+    response_preview: Optional[str] = None
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -43,6 +45,8 @@ class ToolExecutionEvent:
             "error_type": self.error_type,
             "message": self.message,
             "error_summary": self.error_summary,
+            "request_summary": self.request_summary,
+            "response_preview": self.response_preview,
         }
 
 
@@ -91,6 +95,10 @@ class SessionTelemetry:
         output_size: int = 0,
         truncated: bool = False,
         error_type: Optional[str] = None,
+        message: Optional[str] = None,
+        error_summary: Optional[str] = None,
+        request_summary: Optional[str] = None,
+        response_preview: Optional[str] = None,
     ) -> None:
         event = ToolExecutionEvent(
             tool_name=tool_name,
@@ -104,6 +112,10 @@ class SessionTelemetry:
             output_size=output_size,
             truncated=truncated,
             error_type=error_type,
+            message=message,
+            error_summary=error_summary,
+            request_summary=request_summary,
+            response_preview=response_preview,
         )
         self.tool_executions.append(event)
         self.tool_execution_times.setdefault(tool_name, []).append(duration)
@@ -145,6 +157,8 @@ class SessionTelemetry:
                     "tool.error_type": event.error_type,
                     "tool.message": event.message,
                     "tool.error_summary": event.error_summary,
+                    "tool.request_summary": event.request_summary,
+                    "tool.response_preview": event.response_preview,
                 },
             }
 
