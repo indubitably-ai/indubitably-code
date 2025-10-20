@@ -14,8 +14,10 @@ def list_files_tool_def() -> dict:
     return {
         "name": "list_files",
         "description": (
-            "List files and directories at a given path. Defaults to recursive listing. "
-            "Supports depth limits, glob and ignore filters, sorting, and head limiting."
+            "Enumerate files and/or directories under a base path with rich filtering controls. By default the tool walks recursively from `path` (or cwd), skipping common dependency folders, "
+            "and returns repo-relative paths. Tune traversal with `recursive` (set false for a single level), `max_depth`, inclusion flags for files/dirs, `glob` or `ignore_globs` for pattern filtering, "
+            "and sorting by name/mtime/size with optional descending order. You can also truncate results using `head_limit` to avoid flooding the conversation. Example: list_files with path='src', glob='**/*.py', "
+            "max_depth=3 quickly inventories nearby Python modules. Avoid using this tool for retrieving file contents (use read_file) or for searching by content (use grep or codebase_search)."
         ),
         "input_schema": {
             "type": "object",
@@ -190,5 +192,4 @@ def list_files_impl(params: ListFilesInput) -> ToolOutput:
 
     out: List[str] = [t[0] for t in entries]
     return ToolOutput(content=json.dumps(out), success=True)
-
 

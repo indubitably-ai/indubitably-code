@@ -24,9 +24,9 @@ def run_terminal_cmd_tool_def() -> dict:
     return {
         "name": "run_terminal_cmd",
         "description": (
-            "Propose/execute shell commands. Always prefer non-interactive flags. "
-            "If the command is long-running, set is_background=true to run it detached with logs. "
-            "Optional controls: cwd, env overrides, shell selection, stdin payload, and foreground timeout."
+            "Execute shell commands on the host in either foreground or background mode with rich metadata capture. Provide `command` as a full shell string and set `is_background` to false for synchronous execution (capturing stdout/stderr) or true to dispatch the process with log files under run_logs/. "
+            "Optional fields include `explanation` (helpful audit note), `cwd` to change directories, `env` to override environment variables, `timeout` for foreground watchdogs, `stdin` to stream input, and `shell` to select the interpreter (defaults to $SHELL). Foreground executions automatically disable pagers when possible and wrap results in ExecOutput JSON summarizing exit code, duration, and combined output. "
+            "Example: to run tests non-interactively, call run_terminal_cmd with command='pytest -q', is_background=false, timeout=600. Avoid using this tool for interactive sessions, destructive operations without human approval, or long-running daemons unless you intentionally choose background mode and monitor the generated logs."
         ),
         "input_schema": {
             "type": "object",

@@ -42,9 +42,12 @@ def aws_billing_mcp_tool_def() -> dict:
     return {
         "name": "aws_billing_mcp",
         "description": (
-            "Query AWS Billing & Cost Management (Cost Explorer) data using structured inputs. "
-            "Supports common cost and usage analysis operations with friendly defaults for "
-            "time ranges, metrics, and grouping."
+            "Retrieve AWS Cost Explorer analytics through a guided schema that mirrors the Billing MCP server. Specify the Cost Explorer `operation` "
+            "(for example, get_cost_and_usage or get_usage_forecast) and choose either a friendly `timeframe` helper (last_7_days, month_to_date, etc.) or an explicit "
+            "`time_period` with ISO dates; the helper expands into appropriate start/end values. You can fine-tune grouping with `group_by`, target particular metrics via `metrics`/`metric`, "
+            "add raw CLI filters or sort blocks, and page through responses with `next_page_token`. The tool constructs the underlying `aws ce ...` command, enforces sane defaults such as `--no-cli-pager`, "
+            "and pretty-prints JSON output so downstream agents can reason about the result structure. Example: to analyze unblended cost by service over the previous month call with operation='get_cost_and_usage', "
+            "timeframe='last_month', metrics=['UnblendedCost'], group_by=[{'type': 'DIMENSION', 'key': 'SERVICE'}]. Limitations: the host must have AWS CLI credentials with Cost Explorer access, only one operation is executed per call, and the tool is read-only—do not rely on it for cost allocation tag mutations or budgeting setup."
         ),
         "input_schema": {
             "type": "object",

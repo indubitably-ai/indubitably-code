@@ -24,7 +24,11 @@ USER_AGENT = (
 def web_search_tool_def() -> dict:
     return {
         "name": "web_search",
-        "description": "Search the web for real-time information and return top result links with titles.",
+        "description": (
+            "Perform a real-time web search to fetch fresh links, titles, and metadata beyond the model's training cutoff. Provide a descriptive `search_term`, explain the intent via `explanation` when helpful for auditing, and optionally "
+            "set `max_results` to bound how many top hits are returned (defaults to 10). The tool queries DuckDuckGo HTML first, then falls back to its JSON API, Bing, and Wikipedia, reporting which engine produced the results and including diagnostic notes "
+            "when fallbacks were required. The JSON response lists normalized URLs and titles so agents can cite sources directly in their answers. Example: investigate 'OpenTelemetry collector release 2025' by calling web_search with max_results=5 and summarizing the first few URLs. Avoid using this tool for proprietary data that requires authentication, for exhaustive crawling (results are capped per call), or when the answer is already available locally to reduce latency and cost."
+        ),
         "input_schema": {
             "type": "object",
             "additionalProperties": False,

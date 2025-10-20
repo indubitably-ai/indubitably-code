@@ -40,8 +40,10 @@ def template_block_tool_def() -> dict:
     return {
         "name": "template_block",
         "description": (
-            "Insert or replace a multi-line text block relative to an anchor. Supports insert-before, insert-after, or block replacement, "
-            "with dry-run validation so agents can preview the operation before mutating the file."
+            "Insert or replace multi-line text blocks relative to an anchor string, ideal for structured sections like config stanzas or README snippets. Supply `path` to a text file, "
+            "choose a `mode` (insert_before, insert_after, replace_block), and provide an exact `anchor` along with `occurrence` to disambiguate repeated blocks. The `template` field holds the new block; when replacing you must also pass `expected_block` so the tool verifies "
+            "the existing content before rewriting. `dry_run=true` returns JSON describing anchor positions, byte offsets, and warnings (e.g., large file hints) without modifying disk, enabling agents to validate context first. Example: to append a new item to a markdown list, call template_block with mode='insert_after', anchor='## Features', template='- New bullet\n'. "
+            "Avoid using this tool when you need multiple disjoint updates in one call (prefer apply_patch) or when the anchor text is unstable across versions—fetch the latest file with read_file first."
         ),
         "input_schema": {
             "type": "object",

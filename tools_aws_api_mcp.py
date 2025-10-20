@@ -19,11 +19,14 @@ def aws_api_mcp_tool_def() -> dict:
     return {
         "name": "aws_api_mcp",
         "description": (
-            "Execute read-oriented AWS CLI operations using a structured schema. "
-            "Supports selecting the AWS service and operation, optional profile "
-            "and region overrides, and passing CLI parameters. Use extra_args=['help'] "
-            "or set operation='help' to fetch CLI usage guidance when unsure about "
-            "required parameters."
+            "Invoke AWS CLI subcommands through a structured schema, mirroring the AWS API MCP server for investigative workflows. "
+            "Choose the target `service` (e.g., logs, lambda) and `operation` (e.g., describe-log-streams), then optionally provide `parameters` "
+            "as a JSON object whose keys map to long-form CLI flags without the leading dashes. You can override credentials or region via `profile`/`region`, "
+            "force output formatting with `output`, append raw `extra_args` (including ['help'] for usage discovery), and disable the CLI pager. The tool executes "
+            "the command synchronously, returning stdout (pretty-printed when JSON is expected) and surfaces stderr verbatim when failures occur so the agent can recover. "
+            "Example: fetch recent Lambda logs by calling aws_api_mcp with service='logs', operation='filter-log-events', parameters={'log-group-name': '/aws/lambda/handler', 'limit': 20}. "
+            "Avoid using this tool for write or destructive operations unless explicitly permitted, ensure the AWS CLI v2 is configured on the host, and prefer domain-specific "
+            "wrappers if you need higher-level abstractions."
         ),
         "input_schema": {
             "type": "object",

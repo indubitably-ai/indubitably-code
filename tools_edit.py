@@ -15,12 +15,11 @@ def edit_file_tool_def() -> dict:
     return {
         "name": "edit_file",
         "description": (
-            "Make edits to a text file.\n"
-            "Replaces EVERY exact occurrence of 'old_str' (including whitespace) with 'new_str'. "
-            "If multiple matches are found, all are replaced and a warning is returned. "
-            "'old_str' and 'new_str' MUST be different. "
-            "If the file does not exist and old_str == '', the file is created with new_str. "
-            "Set dry_run=true to preview replacements and receive structured JSON feedback."
+            "Perform literal find-and-replace updates against a text file, suitable for small targeted edits. Provide `path`, supply the exact `old_str` to match (whitespace-sensitive), "
+            "and the replacement `new_str`; every occurrence of `old_str` is substituted and the result reports how many replacements occurred along with warnings if a large file or multiple matches were involved. "
+            "If the file does not exist and `old_str` is the empty string, the tool creates the file with `new_str`, allowing agents to bootstrap small assets. Use `dry_run=true` to preview the prospective action, "
+            "including replacement counts and caution messages, before altering disk state. Example: renaming an import can be done by calling edit_file with old_str='from app.v1 import handler' and new_str='from app.v2 import handler'. "
+            "Avoid this tool for regex-style transformations, large structural edits, or scenarios where precise line control is needed—reach for line_edit, template_block, or apply_patch instead."
         ),
         "input_schema": {
             "type": "object",

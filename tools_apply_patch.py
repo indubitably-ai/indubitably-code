@@ -19,10 +19,15 @@ def apply_patch_tool_def() -> dict:
     return {
         "name": "apply_patch",
         "description": (
-            "Apply a structured V4A-style diff to a single file. Supports Add, Update, and Delete actions. "
-            "Update supports multiple single-line replacements using '- ' for removals and '+ ' for additions. "
-            "The tool detects rename hints in unified headers and will instruct you to call rename_file when needed. "
-            "Pass dry_run=true to validate the diff without modifying the file; responses include actionable JSON errors when context mismatches occur."
+            "Apply a single-file V4A-style diff (*** Add|Update|Delete with @@ hunks) directly to the workspace while "
+            "capturing the mutation in the TurnDiffTracker. Use this tool whenever you can describe the intended change as "
+            "a well-formed patch: supply `file_path` pointing at the existing or newly created file and `patch` containing the "
+            "structured diff body. The diff is applied atomically and the tool emits structured JSON success metadata; when "
+            "`dry_run=true` it performs full validation without writing, returning detailed mismatch diagnostics so you can repair "
+            "context drift. Practical example: updating README lines 10-12 should be done by emitting an Update hunk, while adding a new "
+            "module should use an Add header with the full file contents. Do NOT use apply_patch for binary assets, multi-file diffs, or "
+            "large refactors that are easier to express via create_file/edit_file/template_block; rename hints inside patches are advisory and "
+            "must be followed up with an explicit rename_file call."
         ),
         "input_schema": {
             "type": "object",

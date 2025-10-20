@@ -13,8 +13,10 @@ def grep_tool_def() -> dict:
     return {
         "name": "grep",
         "description": (
-            "Search file contents using a regular expression. Respects .gitignore implicitly by walking the tree "
-            "and skipping common VCS and dependency directories. Use for exact or regex content matches."
+            "Search file contents with a Python-regular-expression engine while respecting common VCS and dependency ignore directories. Provide `pattern` using Python syntax, optionally scope the search with "
+            "`path` (root directory) and `glob` (filename filter), and choose `output_mode`: 'content' returns contextual line snippets, 'files_with_matches' lists paths, and 'count' reports match totals. "
+            "You can control surrounding context via `-B`, `-A`, or `-C`, toggle case sensitivity with `-i`, enable multiline matching, and cap response volume with `head_limit`. Example: to inspect TODO comments under src, call grep with pattern='TODO', path='src', output_mode='content', '-C':2. "
+            "Avoid using this tool for binary data, extremely large directories without filters (consider glob or codebase_search first), or scenarios requiring structured parsing beyond regex capabilities."
         ),
         "input_schema": {
             "type": "object",

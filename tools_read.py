@@ -12,9 +12,10 @@ def read_file_tool_def() -> dict:
     return {
         "name": "read_file",
         "description": (
-            "Read a file's contents efficiently with optional byte or line ranges. "
-            "If both byte and line ranges are provided, byte range takes precedence. "
-            "Use for file contents. Not for directories."
+            "Retrieve text from a file with support for slices so agents can avoid loading huge blobs. Provide `path` (absolute or relative), optionally specify `encoding`/`errors` to control decoding, "
+            "and choose one of several range modes: `byte_offset` + `byte_limit` reads a byte slice, `offset` + `limit` streams a line window, and `tail_lines` returns the last N lines. When multiple range parameters are set, "
+            "byte ranges take precedence, mirroring Anthropic tool conventions. The JSON response includes the extracted content, encoding used, and path for traceability. Example: to inspect part of a migration file, call read_file with path='migrations/2025.sql', offset=50, limit=40. "
+            "Avoid using this tool on directories (it will fail), for binary data that should be handled via base64 attachments, or when you need structured parsing—follow up with domain-specific logic after reading the text instead."
         ),
         "input_schema": {
             "type": "object",
@@ -146,4 +147,3 @@ def read_file_impl(params: ReadFileInput) -> ToolOutput:
         return ToolOutput(content=f"Path is a directory: {exc}", success=False, metadata={"error_type": "is_directory"})
     except Exception as exc:
         return ToolOutput(content=f"Read failed: {exc}", success=False, metadata={"error_type": "io_error"})
-

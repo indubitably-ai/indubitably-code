@@ -10,8 +10,10 @@ def glob_file_search_tool_def() -> dict:
     return {
         "name": "glob_file_search",
         "description": (
-            "Find files by name using a glob pattern. Automatically searches recursively and returns matches "
-            "sorted by modification time (newest first)."
+            "Locate files whose paths match a shell-style glob expression, useful when you know part of a filename but not its exact location. Provide a `glob_pattern` such as '*.py' or 'migrations/**/*.sql'; "
+            "the tool will automatically prepend '**/' so the search recurses from the chosen `target_directory` (defaults to cwd). Matches are filtered to regular files, sorted by modification time "
+            "(newest first), converted to repo-relative paths, and optionally truncated with `head_limit`. Example: call glob_file_search with glob_pattern='**/Dockerfile' to find docker definitions scattered across packages. "
+            "Avoid using this for content search (use grep or codebase_search instead), for directory discovery, or when large unbounded patterns would enumerate millions of files without additional narrowing."
         ),
         "input_schema": {
             "type": "object",

@@ -16,8 +16,10 @@ def line_edit_tool_def() -> dict:
     return {
         "name": "line_edit",
         "description": (
-            "Perform precise line edits in a text file. Supports inserting before/after a line, "
-            "replacing a span, or deleting lines based on a 1-based line number or anchor text."
+            "Make precise line-oriented edits to a text file when you need surgical control over insertion points. Choose a `mode` (insert_before, insert_after, replace, delete), "
+            "locate the target via either a 1-based `line` number or exact `anchor` text (optionally with `occurrence`), and provide `line_count`/`text` as required by the mode. "
+            "Set `dry_run=true` to receive structured JSON describing the resolved offsets and affected lines before writing, and rely on the streaming implementation to handle large files while preserving trailing newlines. "
+            "Example: to insert logging after the third occurrence of 'def handler', call line_edit with mode='insert_after', anchor='def handler', occurrence=3, text='    logger.info('start')\n'. Warnings highlight very large files so you can switch to template_block if necessary. Avoid using line_edit when you need to edit multiple disjoint regions at once (prefer apply_patch) or when the anchor text is ambiguous across hundreds of matches."
         ),
         "input_schema": {
             "type": "object",
@@ -257,6 +259,3 @@ def line_edit_impl(params: LineEditInput, tracker: Optional[TurnDiffTracker] = N
         )
 
     return ToolOutput(content=json.dumps(base_result), success=True)
-
-
-
