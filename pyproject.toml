@@ -12,6 +12,7 @@ dependencies = [
     "pyfiglet>=1.0.2",
     "pytest>=8.3",
     "pydantic>=2.7",
+    "rich>=14.2.0",
 ]
 
 [project.scripts]

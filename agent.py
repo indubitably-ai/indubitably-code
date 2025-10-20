@@ -14,6 +14,11 @@ from pathlib import Path
 from typing import Callable, Dict, Any, List, Iterable, Optional, Set, TextIO
 from anthropic import Anthropic, RateLimitError
 from pyfiglet import Figlet
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.text import Text
+
+from tools.tool_summary import summarize_tool_call, truncate_text
 
 from agents_md import load_agents_md
 from config import load_anthropic_config
@@ -163,6 +168,57 @@ class EscapeListener:
             self._stop_event.set()
 
 
+class StatusJournal:
+    """Append-only status log that groups messages by section."""
+
+    _STATE_STYLES = {
+        "pending": "yellow",
+        "ok": "green",
+        "error": "red",
+        "warn": "bright_yellow",
+        "info": "cyan",
+    }
+
+    def __init__(
+        self,
+        *,
+        transcript_path: Optional[str],
+        use_color: bool,
+        console: Optional[Console] = None,
+    ) -> None:
+        self._transcript_path = transcript_path
+        self._seen_sections: List[str] = []
+        self._section_set: Set[str] = set()
+        self._console = console or Console(no_color=not use_color, highlight=False, soft_wrap=False)
+        self._use_color = use_color
+
+    def reset(self) -> None:
+        if self._seen_sections:
+            self._emit(Text(""))
+        self._seen_sections = []
+        self._section_set.clear()
+
+    def record(self, section: str, message: str, *, state: str = "info") -> None:
+        if section not in self._section_set:
+            if self._seen_sections:
+                self._emit(Text(""))
+            heading_style = "bold cyan" if self._use_color else ""
+            heading = Text(f"• {section}", style=heading_style)
+            self._emit(heading)
+            self._section_set.add(section)
+            self._seen_sections.append(section)
+
+        state_style = self._STATE_STYLES.get(state, self._STATE_STYLES["info"])
+        row = Text("  └ ", style="dim" if self._use_color else "")
+        if message:
+            row.append(Text(message, style=state_style if self._use_color else ""))
+        self._emit(row)
+
+    def _emit(self, text: Text) -> None:
+        self._console.print(text)
+        _print_transcript(self._transcript_path, text.plain)
+
+
 def run_agent(
     tools: List["Tool"],
     *,
@@ -265,6 +321,7 @@ def run_agent(
     BOLD = "[1m" if use_color else ""
     DIM = "[2m" if use_color else ""
     RESET = "[0m" if use_color else ""
+    console = Console(no_color=not use_color, highlight=False, soft_wrap=False)
     figlet = Figlet(font="standard")
     ascii_art = figlet.renderText("INDUBITABLY CODE")
     art_lines = ascii_art.rstrip("\n").split("\n")
@@ -289,9 +346,18 @@ def run_agent(
 
     turn_index = 0
 
+    last_logged_turn: Optional[str] = None
+
+    journal = (
+        StatusJournal(transcript_path=transcript_path, use_color=use_color, console=console)
+        if not debug_tool_use
+        else None
+    )
+
     try:
         while True:
             added_user_this_turn = False
+            current_turn_label = f"Turn {turn_index + 1}"
             if read_user:
                 listener.disarm()
                 status_snapshot = context.status()
@@ -325,6 +391,9 @@ def run_agent(
                 continue
 
             try:
+                if journal and last_logged_turn != current_turn_label:
+                    journal.reset()
+                    last_logged_turn = current_turn_label
                 packed = packer.pack()
                 if debug_tool_use:
                     _debug_print_prompt(packed, YELLOW, RESET, use_color)
@@ -336,10 +405,24 @@ def run_agent(
                 }
                 if packed.system:
                     request_kwargs["system"] = packed.system
+                if journal:
+                    journal.record(current_turn_label, "Anthropic request started", state="pending")
                 msg = client.messages.create(**request_kwargs)
+                if journal:
+                    journal.record(
+                        current_turn_label,
+                        f"Anthropic response received ({len(msg.content)} blocks)",
+                        state="ok",
+                    )
                 backoff_seconds = 2.0
                 rate_limit_retries = 0
             except RateLimitError as exc:  # pragma: no cover - requires live API
+                if journal:
+                    journal.record(
+                        current_turn_label,
+                        f"Rate limited; retrying in {min(backoff_seconds, 30.0):.1f}s",
+                        state="warn",
+                    )
                 wait = min(backoff_seconds, 30.0)
                 print(
                     f"Anthropic rate limit hit; retrying in {wait:.1f}s... ({exc})",
@@ -359,6 +442,8 @@ def run_agent(
                 read_user = False
                 continue
             except Exception as exc:  # pragma: no cover - surfaced to user
+                if journal:
+                    journal.record(current_turn_label, f"Anthropic error: {exc}", state="error")
                 print(f"Anthropic error: {exc}", file=sys.stderr)
                 if added_user_this_turn:
                     context.rollback_last_turn()
@@ -389,14 +474,24 @@ def run_agent(
                 btype = block_dict.get("type")
                 if btype == "text":
                     text = block_dict.get("text", "")
-                    _print_assistant_text(text, GREEN, RESET)
+                    _print_assistant_text(
+                        text,
+                        GREEN,
+                        RESET,
+                        console=console,
+                        use_color=use_color,
+                    )
                     _print_transcript(transcript_path, f"SAMUS: {text}")
                 elif btype == "tool_use":
                     encountered_tool = True
                     tool_name = block_dict.get("name", "")
                     tool_input = block_dict.get("input", {})
+                    tool_summary = summarize_tool_call(tool_name, tool_input)
                     tool_use_id = block_dict.get("id") or block_dict.get("tool_use_id", "tool")
                     call = tool_router.build_tool_call(block_dict)
+                    if journal:
+                        label = tool_summary or (tool_name or "tool")
+                        journal.record(current_turn_label, f"{label} requested", state="info")
 
                     _print_tool_invocation(
                         tool_name,
@@ -414,6 +509,13 @@ def run_agent(
                         _print_tool_result(result_str, is_error, RED if is_error else GREEN, RESET, verbose=debug_tool_use)
                         transcript_label = "ERROR" if is_error else "RESULT"
                         _print_transcript(transcript_path, f"TOOL {tool_name} {transcript_label}: {result_str}")
+                        if journal:
+                            label = tool_summary or (tool_name or "tool")
+                            journal.record(
+                                current_turn_label,
+                                f"{label} failed: unrecognized payload",
+                                state="error",
+                            )
                         tool_block = context.build_tool_result_block(
                             tool_use_id,
                             result_str,
@@ -442,6 +544,13 @@ def run_agent(
                         _print_tool_result(result_str, is_error, RED if is_error else GREEN, RESET, verbose=debug_tool_use)
                         transcript_label = "ERROR" if is_error else "RESULT"
                         _print_transcript(transcript_path, f"TOOL {tool_name} {transcript_label}: {result_str}")
+                        if journal:
+                            label = tool_summary or (tool_name or "tool")
+                            journal.record(
+                                current_turn_label,
+                                f"{label} failed: not found",
+                                state="error",
+                            )
                         tool_block = context.build_tool_result_block(
                             tool_use_id,
                             result_str,
@@ -468,6 +577,13 @@ def run_agent(
                             _print_tool_result(result_str, is_error, RED if is_error else GREEN, RESET, verbose=debug_tool_use)
                             transcript_label = "ERROR" if is_error else "RESULT"
                             _print_transcript(transcript_path, f"TOOL {tool_name} {transcript_label}: {result_str}")
+                            if journal:
+                                label = tool_summary or (tool_name or "tool")
+                                journal.record(
+                                    current_turn_label,
+                                    f"{label} skipped: user interrupt",
+                                    state="warn",
+                                )
                             tool_block = context.build_tool_result_block(
                                 tool_use_id,
                                 result_str,
@@ -487,7 +603,14 @@ def run_agent(
                             tool_event_counter += 1
                             continue
 
-                        pending_calls.append((call, tool_name, tool_input, tool_use_id))
+                        pending_calls.append((call, tool_name, tool_input, tool_use_id, tool_summary))
+                        if journal:
+                            label = tool_summary or (tool_name or "tool")
+                            journal.record(
+                                current_turn_label,
+                                f"{label} queued for execution",
+                                state="pending",
+                            )
 
             if tool_results_content:
                 context.add_tool_results(tool_results_content, dedupe=False)
@@ -515,12 +638,20 @@ def run_agent(
                     return await asyncio.gather(*tasks)
 
                 results = asyncio.run(_run_pending())
-                for result, (call, tool_name, tool_input, tool_use_id) in zip(results, pending_calls):
+                for result, (call, tool_name, tool_input, tool_use_id, tool_summary) in zip(results, pending_calls):
                     is_error = bool(result.get("is_error"))
                     result_str = str(result.get("content", ""))
                     _print_tool_result(result_str, is_error, RED if is_error else GREEN, RESET, verbose=debug_tool_use)
                     transcript_label = "ERROR" if is_error else "RESULT"
                     _print_transcript(transcript_path, f"TOOL {tool_name} {transcript_label}: {result_str}")
+                    if journal:
+                        state = "error" if is_error else "ok"
+                        preview = truncate_text(result_str.strip(), limit=80)
+                        label = tool_summary or (tool_name or "tool")
+                        message = f"{label} {'error' if is_error else 'completed'}"
+                        if preview:
+                            message = f"{message}: {preview}"
+                        journal.record(current_turn_label, message, state=state)
 
                     # Preserve preformatted tool result content/metadata as provided by runtime
                     tool_block = {
@@ -554,6 +685,8 @@ def run_agent(
                 pending_calls = []
 
             if fatal_event:
+                if journal:
+                    journal.record(current_turn_label, "Fatal tool error encountered", state="error")
                 print("Fatal tool error encountered; stopping session.", file=sys.stderr)
                 break
 
@@ -565,6 +698,15 @@ def run_agent(
                 read_user = True
             else:
                 read_user = False
+    except KeyboardInterrupt:
+        friendly = "Goodbye!"
+        if journal:
+            journal.reset()
+            journal.record("Session", friendly, state="info")
+        else:
+            style = "bold yellow" if use_color else ""
+            console.print(Text(friendly, style=style))
+        _print_transcript(transcript_path, f"SYSTEM: {friendly}")
     finally:
         listener.disarm()
         try:
@@ -637,8 +779,22 @@ def _normalize_block(block: Any) -> Dict[str, Any]:
 
 
 
-def _print_assistant_text(text: str, color: str, reset: str, width: int = 80) -> None:
+def _print_assistant_text(
+    text: str,
+    color: str,
+    reset: str,
+    width: int = 80,
+    *,
+    console: Optional[Console] = None,
+    use_color: bool = True,
+) -> None:
     if not text:
+        return
+    if console is not None:
+        header_style = "bold green" if use_color else ""
+        console.print(Text("Samus ▸", style=header_style))
+        console.print(Markdown(text))
+        console.print()
         return
     formatted = _format_assistant_text(text, width=width)
     print(f"{color}Samus ▸{reset}\n{formatted}\n")
@@ -653,7 +809,9 @@ def _print_tool_invocation(
     *,
     verbose: bool,
 ) -> None:
-    print(f"{label_color}⚙️  Tool ▸ {name}{reset}")
+    summary = summarize_tool_call(name, payload)
+    label = summary or name
+    print(f"{label_color}⚙️  Tool ▸ {label}{reset}")
     if not verbose:
         return
     if isinstance(payload, dict) and payload:

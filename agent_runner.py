@@ -409,8 +409,11 @@ class AgentRunner:
         if fatal_event and stopped_reason != "fatal_tool_error":
             stopped_reason = "fatal_tool_error"
 
-        final_response = "\n".join(txt for txt in text_outputs if txt).strip()
         conversation_payload = context.build_messages()
+
+        final_response = "\n".join(txt for txt in text_outputs if txt).strip()
+        if not final_response:
+            final_response = _latest_assistant_text(conversation_payload)
 
         result = AgentRunResult(
             final_response=final_response,
@@ -929,3 +932,20 @@ def _normalize_block(block: Any) -> Dict[str, Any]:
 def _blocks_to_text(blocks: Iterable[Dict[str, Any]]) -> str:
     texts = [block.get("text", "") for block in blocks if block.get("type") == "text"]
     return "\n".join(txt for txt in texts if txt).strip()
+
+
+def _latest_assistant_text(messages: Iterable[Dict[str, Any]]) -> str:
+    if not messages:
+        return ""
+    for message in reversed(list(messages)):
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") != "assistant":
+            continue
+        content = message.get("content") or []
+        if not isinstance(content, list):
+            continue
+        text = _blocks_to_text(content)
+        if text:
+            return text
+    return ""
