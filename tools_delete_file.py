@@ -13,7 +13,12 @@ from session.turn_diff_tracker import TurnDiffTracker
 def delete_file_tool_def() -> dict:
     return {
         "name": "delete_file",
-        "description": "Delete a file at the specified path. Fails gracefully if it does not exist.",
+        "description": (
+            "Delete a single regular file from the repository with audit-friendly logging. Pass the `path` to the target file; the tool verifies the path refers to a file (not a directory), "
+            "locks it through the TurnDiffTracker, and removes it from disk while emitting JSON indicating the action taken. If the file is already absent the call succeeds with a note so agents "
+            "can continue idempotently. Example: removing an obsolete snapshot would involve delete_file with path='tests/__snapshots__/component.snap'. Do not use delete_file to remove directories, "
+            "to wipe generated build artifacts en masse, or to circumvent review of large deletions—prefer project-specific cleanup scripts or template_block for inline content removal."
+        ),
         "input_schema": {
             "type": "object",
             "additionalProperties": False,

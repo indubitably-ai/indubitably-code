@@ -19,8 +19,10 @@ def playwright_mcp_tool_def() -> dict:
     return {
         "name": "playwright_mcp",
         "description": (
-            "Automate a headless browser session using Playwright. Supports navigation, "
-            "screenshots, DOM extraction, and script evaluation similar to the Playwright MCP server."
+            "Automate a headless Playwright browser session using a simplified MCP-inspired interface. Choose an `action`: 'navigate_and_screenshot' loads a page and captures an image, 'get_content' fetches HTML/text, and 'evaluate_script' runs a JavaScript snippet. "
+            "You can specify `url`, tune navigation waits with `wait_until`/`wait_for_selector`/`wait_timeout_ms`, configure headers or viewport, and control screenshots via `screenshot_path`, `full_page`, `return_screenshot_base64`, and `ascii_preview`. Script actions accept `script` plus an optional `script_result_json` toggle, "
+            "while all actions can select a browser engine and headless mode. Example: to snapshot a login page after ensuring the form is visible, call navigate_and_screenshot with wait_for_selector='#login'. Avoid using this tool for authenticated flows that require complex multi-step interactions (build a dedicated automation instead), "
+            "for extremely long-running crawls (there is no background mode), or when simpler HTTP fetching via requests would suffice."
         ),
         "input_schema": {
             "type": "object",

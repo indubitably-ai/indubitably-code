@@ -14,8 +14,9 @@ def rename_file_tool_def() -> dict:
     return {
         "name": "rename_file",
         "description": (
-            "Rename or move a file. Ensures the source exists, the destination parent directory "
-            "is created when requested, and optionally refuses to overwrite existing files."
+            "Rename or move a single file with explicit safeguards against accidental overwrites. Provide `source_path` (must exist and be a file) and `dest_path`; set `overwrite=true` only when it is safe to replace an existing target, "
+            "and enable `create_dest_parent` to build missing directories automatically. The tool integrates with TurnDiffTracker so rename operations are captured in session diffs, and `dry_run=true` returns JSON summarizing the action without touching the filesystem. "
+            "Example: to move a generated report under archives invoke rename_file with overwrite=false so you fail fast if the destination already exists. Avoid using this tool for directory moves, bulk refactors (script them instead), or when git mv has already been orchestrated outside the agent context."
         ),
         "input_schema": {
             "type": "object",

@@ -17,9 +17,10 @@ def todo_write_tool_def() -> dict:
     return {
         "name": "todo_write",
         "description": (
-            "Create/update a structured TODO list for the current session. "
-            "When merge=true, todos are merged by id; unspecified fields remain unchanged. "
-            "When merge=false, the provided list replaces the current list."
+            "Maintain a lightweight, session-scoped TODO list that agents can update incrementally. Provide `merge` to control behavior: true merges incoming items (by `id`) into the existing set, "
+            "preserving unspecified fields, while false replaces the store entirely. The `todos` array accepts objects containing `id`, optional `content`, and `status` drawn from the allowed enum so downstream "
+            "interfaces can render consistent progress. The tool persists data in .session_todos.json, timestamps updates, and records diffs via TurnDiffTracker when available. Example: to mark a task complete, call todo_write with merge=true and todos=[{'id': 'tests', 'status': 'completed'}]. "
+            "Avoid using this tool for persistent project management (it is scoped to the current workspace run), for high-volume notes (prefer a markdown document), or with duplicate IDs across different intents."
         ),
         "input_schema": {
             "type": "object",

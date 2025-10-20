@@ -16,8 +16,12 @@ def create_file_tool_def() -> dict:
     return {
         "name": "create_file",
         "description": (
-            "Create or ensure a file with the provided content. Supports if-exists policies (error, "
-            "overwrite, skip) and optional parent directory creation."
+            "Create a UTF-8 text file (or intentionally overwrite one) using explicit safety switches so agents do not clobber content accidentally. Supply `path` to the desired "
+            "location, optionally pass `content` (defaults to the empty string), and choose `if_exists` to control collision behavior: 'error' aborts, 'overwrite' replaces the file, "
+            "and 'skip' treats the operation as a no-op success. Set `create_parents=true` when intermediate directories should be created, specify `encoding` only if you need "
+            "an alternate codec, and use `dry_run=true` to receive JSON describing the would-be action plus byte counts without touching the filesystem. Example: to stage a new migration stub, "
+            "call create_file with path='migrations/20250101_add_index.sql', content='-- TODO', create_parents=true, if_exists='error'. Avoid using this tool for binary artifacts (use dedicated upload tooling instead), "
+            "for edits inside existing files (prefer edit_file, line_edit, or apply_patch), or for mass file generation that should be handled by project scaffolding scripts."
         ),
         "input_schema": {
             "type": "object",

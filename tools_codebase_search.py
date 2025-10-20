@@ -17,8 +17,12 @@ def codebase_search_tool_def() -> dict:
     return {
         "name": "codebase_search",
         "description": (
-            "Heuristic semantic-like search over the codebase. Finds likely relevant files/snippets for a natural "
-            "language query by scoring filenames, paths, and content. Returns top matches with snippets."
+            "Execute a heuristic relevance search over the local repository to surface files and snippets that likely answer a natural-language query. The tool traverses "
+            "only source-like extensions (see _ALLOWED_EXTS) while respecting common ignore directories, then scores filenames, directories, and content lines against the "
+            "lowercased query tokens so that both direct string matches and partial overlaps contribute to a higher score. Provide `query` text along with optional `target_directories` to "
+            "scope the search, an opt-in `glob_pattern` for tighter filtering, `max_results` to cap the number of matches, and `snippet_lines` to control context length in the returned "
+            "line-numbered excerpts. The response is JSON with paths, scores, match metadata, and human-readable snippets an agent can relay to a user or follow up with read_file calls. Example: "
+            "when asked 'Where do we send telemetry?' you might call codebase_search with query='telemetry exporter', target_directories=['server'], max_results=5 to quickly find candidate files before reading them. Avoid using this tool for binary assets, full-text exports, or when you already know the exact file path; it is best-effort scoring (not vector search) and large monorepos may yield slower responses if overused without filters."
         ),
         "input_schema": {
             "type": "object",
