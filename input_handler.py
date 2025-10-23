@@ -1,11 +1,13 @@
 """Input handler with command history support using prompt_toolkit."""
 
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Optional
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.formatted_text import ANSI, HTML
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.input import Input
 
@@ -13,6 +15,28 @@ from prompt_toolkit.input import Input
 DEFAULT_HISTORY_DIR = Path.home() / ".indubitably-code"
 DEFAULT_HISTORY_FILE = DEFAULT_HISTORY_DIR / "history.txt"
 MAX_HISTORY_ENTRIES = 100
+
+# ANSI escape code pattern
+ANSI_ESCAPE_PATTERN = re.compile(r'\x1b\[[0-9;]*m')
+
+
+def _format_prompt_for_toolkit(prompt: str) -> ANSI:
+    """
+    Format prompt string for prompt_toolkit.
+
+    If the prompt contains ANSI escape codes, wrap it in ANSI() so
+    prompt_toolkit interprets them correctly. Otherwise, return as-is.
+
+    Args:
+        prompt: Prompt string, possibly containing ANSI codes
+
+    Returns:
+        ANSI-wrapped prompt for proper rendering
+    """
+    # If prompt contains ANSI codes, wrap it so prompt_toolkit handles them
+    if ANSI_ESCAPE_PATTERN.search(prompt):
+        return ANSI(prompt)
+    return prompt
 
 
 class HistoryManager:
@@ -101,9 +125,10 @@ class InputHandler:
                 if self._custom_input is not None:
                     kwargs["input"] = self._custom_input
                 self._session = PromptSession(**kwargs)
-            except (AttributeError, OSError):
+            except Exception:
                 # Fall back to basic input if PromptSession can't be created
                 # This can happen in tests or non-TTY environments
+                # Catch all exceptions to ensure we always have a working fallback
                 self._fallback_mode = True
                 return None
         return self._session
@@ -144,7 +169,9 @@ class InputHandler:
 
         # Normal mode: use PromptSession
         try:
-            result = session.prompt(prompt)
+            # Format prompt for prompt_toolkit (handles ANSI codes properly)
+            formatted_prompt = _format_prompt_for_toolkit(prompt)
+            result = session.prompt(formatted_prompt)
             # Rotate history after successful input
             self.history_manager.rotate_history()
             return result

@@ -13,6 +13,7 @@ from input_handler import (
     MAX_HISTORY_ENTRIES,
     HistoryManager,
     InputHandler,
+    _format_prompt_for_toolkit,
 )
 
 
@@ -146,23 +147,31 @@ class TestInputHandler:
         handler = InputHandler(history_manager=manager)
         assert handler.history_manager is manager
 
-    def test_get_session_creates_session(self, tmp_path: Path) -> None:
-        """Test that _get_session creates a PromptSession."""
+    def test_get_session_fallback_mode(self, tmp_path: Path) -> None:
+        """Test that _get_session returns None in fallback mode."""
         manager = HistoryManager(history_file=tmp_path / "history.txt")
         handler = InputHandler(history_manager=manager)
+
+        # Force fallback mode
+        handler._fallback_mode = True
 
         session = handler._get_session()
-        assert session is not None
-        assert handler._session is session
+        assert session is None
 
-    def test_get_session_reuses_session(self, tmp_path: Path) -> None:
-        """Test that _get_session reuses the same session."""
-        manager = HistoryManager(history_file=tmp_path / "history.txt")
-        handler = InputHandler(history_manager=manager)
+    def test_get_session_caching(self, tmp_path: Path) -> None:
+        """Test that _get_session caches the session."""
+        # Mock PromptSession to avoid creating real sessions that affect other tests
+        mock_session = MagicMock()
 
-        session1 = handler._get_session()
-        session2 = handler._get_session()
-        assert session1 is session2
+        with patch("input_handler.PromptSession", return_value=mock_session):
+            manager = HistoryManager(history_file=tmp_path / "history.txt")
+            handler = InputHandler(history_manager=manager)
+
+            session1 = handler._get_session()
+            session2 = handler._get_session()
+            # Should return the same cached session
+            assert session1 is session2
+            assert session1 is mock_session
 
     @patch("input_handler.PromptSession")
     def test_get_input_returns_user_input(self, mock_session_class: Mock, tmp_path: Path) -> None:
@@ -268,3 +277,49 @@ class TestInputHandler:
         with open(history_file, "r", encoding="utf-8") as f:
             lines = f.readlines()
         assert len(lines) == 5
+
+
+class TestPromptFormatting:
+    """Test prompt formatting for prompt_toolkit."""
+
+    def test_format_prompt_with_ansi_codes(self) -> None:
+        """Test that prompts with ANSI codes are wrapped."""
+        from prompt_toolkit.formatted_text import ANSI
+
+        # Test with bold ANSI code
+        prompt = "\x1b[1mYou ▸ \x1b[0m"
+        result = _format_prompt_for_toolkit(prompt)
+        assert isinstance(result, ANSI)
+
+    def test_format_prompt_without_ansi_codes(self) -> None:
+        """Test that prompts without ANSI codes are returned as-is."""
+        prompt = "You ▸ "
+        result = _format_prompt_for_toolkit(prompt)
+        assert result == prompt
+        assert isinstance(result, str)
+
+    def test_format_prompt_with_bold_and_reset(self) -> None:
+        """Test common bold + reset pattern."""
+        from prompt_toolkit.formatted_text import ANSI
+
+        BOLD = "\x1b[1m"
+        RESET = "\x1b[0m"
+        prompt = f"{BOLD}You ▸ {RESET}"
+        result = _format_prompt_for_toolkit(prompt)
+        assert isinstance(result, ANSI)
+
+    def test_format_prompt_with_color_codes(self) -> None:
+        """Test prompts with color ANSI codes."""
+        from prompt_toolkit.formatted_text import ANSI
+
+        # Green text
+        prompt = "\x1b[92mYou ▸ \x1b[0m"
+        result = _format_prompt_for_toolkit(prompt)
+        assert isinstance(result, ANSI)
+
+    def test_format_prompt_empty_string(self) -> None:
+        """Test empty prompt string."""
+        prompt = ""
+        result = _format_prompt_for_toolkit(prompt)
+        assert result == ""
+        assert isinstance(result, str)

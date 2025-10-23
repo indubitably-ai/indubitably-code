@@ -226,3 +226,36 @@ def test_enhanced_menu_displays_input_hints(
     assert "/status" in captured.out
     assert "/compact" in captured.out
     assert "Quit Ctrl+C" in captured.out
+
+
+def test_prompt_displays_correctly_with_ansi_codes(tmp_path: Path) -> None:
+    """Test that ANSI codes in prompts are properly formatted."""
+    from input_handler import InputHandler, _format_prompt_for_toolkit
+    from prompt_toolkit.formatted_text import ANSI
+
+    # Test the actual prompt used in agent.py
+    BOLD = "\x1b[1m"
+    RESET = "\x1b[0m"
+    agent_prompt = f"{BOLD}You ▸ {RESET}"
+
+    # Verify it gets wrapped in ANSI
+    formatted = _format_prompt_for_toolkit(agent_prompt)
+    assert isinstance(formatted, ANSI)
+
+    # Verify InputHandler can handle this prompt
+    history_file = tmp_path / "history.txt"
+    handler = InputHandler()
+
+    # Mock the session to verify the formatted prompt is used
+    with patch.object(handler, "_get_session") as mock_session_getter:
+        mock_session = MagicMock()
+        mock_session.prompt.return_value = "test input"
+        mock_session_getter.return_value = mock_session
+
+        result = handler.get_input(agent_prompt)
+
+        # Verify the prompt was formatted before being passed to session.prompt
+        call_args = mock_session.prompt.call_args
+        assert call_args is not None
+        prompt_arg = call_args[0][0]
+        assert isinstance(prompt_arg, ANSI), f"Expected ANSI, got {type(prompt_arg)}"
