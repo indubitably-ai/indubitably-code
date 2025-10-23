@@ -931,7 +931,7 @@ def _format_assistant_text(text: str, width: int = 80) -> str:
 
 
 def _print_prompt_menu(dim: str, reset: str, status: Optional[Dict[str, Any]] = None) -> None:
-    base = f"{dim}Send ↵  •  /status  •  /compact  •  Quit Ctrl+C{reset}" if dim or reset else "Send ↵  •  /status  •  /compact  •  Quit Ctrl+C"
+    base = f"{dim}Send ↵  •  ↑↓ History  •  ←→ Edit  •  /status  •  /compact  •  ESC Interrupt  •  Quit Ctrl+C{reset}" if dim or reset else "Send ↵  •  ↑↓ History  •  ←→ Edit  •  /status  •  /compact  •  ESC Interrupt  •  Quit Ctrl+C"
     print(base)
     if not status:
         return

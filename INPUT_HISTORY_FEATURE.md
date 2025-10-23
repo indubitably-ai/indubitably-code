@@ -2,25 +2,44 @@
 
 This document describes the new input history functionality added to the agent CLI.
 
+## Enhanced User Experience
+
+The input prompt now includes helpful hints showing available navigation options:
+
+```
+Send ↵  •  ↑↓ History  •  ←→ Edit  •  /status  •  /compact  •  ESC Interrupt  •  Quit Ctrl+C
+Tokens 0/180000  •  100% Context left
+
+You ▸ _
+```
+
 ## Features
 
 ### 1. Command History with Arrow Keys
-- **Up/Down arrows**: Navigate through previous commands
+- **Up/Down arrows (↑↓)**: Navigate through previous commands
 - **Ctrl+R**: Search through command history (prompt_toolkit built-in)
 - History is persistent across sessions
+- **Hint shown in menu**: `↑↓ History`
 
 ### 2. Inline Editing
-- **Left/Right arrows**: Move cursor within the input line
+- **Left/Right arrows (←→)**: Move cursor within the input line
 - **Home/End**: Jump to beginning/end of line
 - **Ctrl+A/E**: Alternative shortcuts for Home/End (Unix-style)
 - **Backspace/Delete**: Edit text at cursor position
+- **Hint shown in menu**: `←→ Edit`
 
-### 3. Large Paste Support
+### 3. Interrupt Options
+- **ESC key**: Pause the agent mid-execution to provide guidance
+- **Ctrl+C**: Quit the agent gracefully
+- **Ctrl+D**: Exit via EOF (alternative to Ctrl+C)
+- **Hints shown in menu**: `ESC Interrupt` and `Quit Ctrl+C`
+
+### 4. Large Paste Support
 - Automatically handles large pasted content (tested up to 1000+ lines)
 - No special key combinations needed - just paste
 - Content is processed as-is without truncation
 
-### 4. History Management
+### 5. History Management
 - History stored in `~/.indubitably-code/history.txt`
 - Automatically limited to last 100 commands
 - Rotation happens after each input
@@ -69,11 +88,18 @@ uv run pytest tests/integration/test_input_history_integration.py -v
 uv run agent.py
 ```
 
+You should see the enhanced menu:
+```
+Send ↵  •  ↑↓ History  •  ←→ Edit  •  /status  •  /compact  •  ESC Interrupt  •  Quit Ctrl+C
+```
+
 Then try:
-- Type some commands
-- Press Up arrow to see previous commands
-- Press Ctrl+D to exit
-- Run again - your history should be preserved
+- Type some commands and press Enter
+- Press **Up arrow (↑)** to see previous commands
+- Press **Left/Right arrows (←→)** to edit within the line
+- Press **ESC** while the agent is thinking to interrupt
+- Press **Ctrl+D** to exit
+- Run again - your history should be preserved in `~/.indubitably-code/history.txt`
 - Paste a large block of text - it should work seamlessly
 
 ## Dependencies

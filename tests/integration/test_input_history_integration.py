@@ -199,3 +199,30 @@ def test_keyboard_interrupt_rotates_history(tmp_path: Path) -> None:
     with open(history_file, "r", encoding="utf-8") as f:
         lines = f.readlines()
     assert len(lines) == 10
+
+
+def test_enhanced_menu_displays_input_hints(
+    integration_workspace,
+    anthropic_mock,
+    input_stub,
+    fake_figlet,
+    capsys,
+) -> None:
+    """Test that the enhanced menu displays input navigation hints."""
+
+    client = anthropic_mock.patch("agent.Anthropic")
+    client.reset()
+
+    # Provide EOF to exit immediately
+    mock = input_stub()
+
+    run_agent([], use_color=False)
+
+    captured = capsys.readouterr()
+    # Verify all the enhanced menu elements are present
+    assert "↑↓ History" in captured.out
+    assert "←→ Edit" in captured.out
+    assert "ESC Interrupt" in captured.out
+    assert "/status" in captured.out
+    assert "/compact" in captured.out
+    assert "Quit Ctrl+C" in captured.out
