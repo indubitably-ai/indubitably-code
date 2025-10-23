@@ -23,6 +23,7 @@ from tools.tool_summary import summarize_tool_call, truncate_text
 from agents_md import load_agents_md
 from config import load_anthropic_config
 from commands import handle_slash_command
+from input_handler import InputHandler
 from prompt import PromptPacker, PackedPrompt
 from session import ContextSession, TurnDiffTracker, load_session_settings
 from tools import (
@@ -354,6 +355,9 @@ def run_agent(
         else None
     )
 
+    # Initialize input handler with history support
+    input_handler = InputHandler()
+
     try:
         while True:
             added_user_this_turn = False
@@ -362,11 +366,11 @@ def run_agent(
                 listener.disarm()
                 status_snapshot = context.status()
                 _print_prompt_menu(DIM, RESET, status_snapshot)
-                print(f"{BOLD}You ▸ {RESET}", end="", flush=True)
-                line = sys.stdin.readline()
-                if not line:
+                try:
+                    stripped = input_handler.get_input(f"{BOLD}You ▸ {RESET}")
+                except EOFError:
+                    # User pressed Ctrl+D
                     break
-                stripped = line.rstrip("\n")
                 if not stripped:
                     read_user = True
                     continue
@@ -709,6 +713,7 @@ def run_agent(
         _print_transcript(transcript_path, f"SYSTEM: {friendly}")
     finally:
         listener.disarm()
+        input_handler.cleanup()
         try:
             # Flush telemetry to OTEL (JSONL) if export is enabled in session settings
             try:
