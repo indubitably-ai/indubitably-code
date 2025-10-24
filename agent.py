@@ -23,6 +23,7 @@ from tools.tool_summary import summarize_tool_call, truncate_text
 from agents_md import load_agents_md
 from config import load_anthropic_config
 from commands import handle_slash_command
+from input_handler import InputHandler
 from prompt import PromptPacker, PackedPrompt
 from session import ContextSession, TurnDiffTracker, load_session_settings
 from tools import (
@@ -219,6 +220,38 @@ class StatusJournal:
         _print_transcript(self._transcript_path, text.plain)
 
 
+def _prompt_for_approval(
+    *,
+    tool_name: str,
+    command: Optional[str] = None,
+    paths: Optional[List[str]] = None,
+) -> bool:
+    """Prompt user for approval to execute a tool.
+
+    Args:
+        tool_name: Name of the tool requesting approval
+        command: Command to execute (if applicable)
+        paths: Paths that will be affected (if applicable)
+
+    Returns:
+        True if user approves, False otherwise
+    """
+    print(f"\n⚠️  Approval Required ⚠️")
+    print(f"Tool: {tool_name}")
+    if command:
+        print(f"Command: {command}")
+    if paths:
+        print(f"Paths: {', '.join(paths)}")
+
+    while True:
+        response = input("Allow this operation? [y/n]: ").strip().lower()
+        if response in ('y', 'yes'):
+            return True
+        if response in ('n', 'no'):
+            return False
+        print("Please answer 'y' or 'n'")
+
+
 def run_agent(
     tools: List["Tool"],
     *,
@@ -254,6 +287,10 @@ def run_agent(
         mcp_client_ttl=_compute_mcp_ttl() if mcp_enabled else None,
         mcp_definitions=mcp_definitions if mcp_enabled else None,
     )
+
+    # Set up approval callback for interactive prompting
+    context.request_approval = _prompt_for_approval  # type: ignore[attr-defined]
+
     agents_doc = load_agents_md()
     if agents_doc:
         context.register_system_text(agents_doc.system_text())
@@ -354,6 +391,9 @@ def run_agent(
         else None
     )
 
+    # Initialize input handler with history support
+    input_handler = InputHandler()
+
     try:
         while True:
             added_user_this_turn = False
@@ -362,11 +402,11 @@ def run_agent(
                 listener.disarm()
                 status_snapshot = context.status()
                 _print_prompt_menu(DIM, RESET, status_snapshot)
-                print(f"{BOLD}You ▸ {RESET}", end="", flush=True)
-                line = sys.stdin.readline()
-                if not line:
+                try:
+                    stripped = input_handler.get_input(f"{BOLD}You ▸ {RESET}")
+                except EOFError:
+                    # User pressed Ctrl+D
                     break
-                stripped = line.rstrip("\n")
                 if not stripped:
                     read_user = True
                     continue
@@ -603,6 +643,57 @@ def run_agent(
                             tool_event_counter += 1
                             continue
 
+                        # Check if tool requires approval before execution
+                        if impl and impl.capabilities and "write_fs" in impl.capabilities:
+                            exec_context = getattr(context, "exec_context", None)
+                            if exec_context and exec_context.requires_approval(tool_name, is_write=True):
+                                # Extract paths from tool input for approval prompt
+                                paths = _extract_paths(tool_input)
+
+                                # Request approval from user
+                                try:
+                                    approved = context.request_approval(  # type: ignore[attr-defined]
+                                        tool_name=tool_name,
+                                        command=None,
+                                        paths=list(paths) if paths else None,
+                                    )
+                                except Exception as exc:
+                                    approved = False
+                                    print(f"Approval request failed: {exc}", file=sys.stderr)
+
+                                if not approved:
+                                    result_str = "Tool execution denied by user"
+                                    is_error = True
+                                    tool_skipped = True
+                                    _print_tool_result(result_str, is_error, RED if is_error else GREEN, RESET, verbose=debug_tool_use)
+                                    transcript_label = "ERROR" if is_error else "RESULT"
+                                    _print_transcript(transcript_path, f"TOOL {tool_name} {transcript_label}: {result_str}")
+                                    if journal:
+                                        label = tool_summary or (tool_name or "tool")
+                                        journal.record(
+                                            current_turn_label,
+                                            f"{label} denied by user",
+                                            state="warn",
+                                        )
+                                    tool_block = context.build_tool_result_block(
+                                        tool_use_id,
+                                        result_str,
+                                        is_error=is_error,
+                                    )
+                                    tool_results_content.append(tool_block)
+                                    _record_tool_debug_event(
+                                        debug_tool_use,
+                                        debug_log_path,
+                                        turn=tool_event_counter + 1,
+                                        tool_name=tool_name,
+                                        payload=tool_input,
+                                        result=result_str,
+                                        is_error=is_error,
+                                        skipped=tool_skipped,
+                                    )
+                                    tool_event_counter += 1
+                                    continue
+
                         pending_calls.append((call, tool_name, tool_input, tool_use_id, tool_summary))
                         if journal:
                             label = tool_summary or (tool_name or "tool")
@@ -709,6 +800,7 @@ def run_agent(
         _print_transcript(transcript_path, f"SYSTEM: {friendly}")
     finally:
         listener.disarm()
+        input_handler.cleanup()
         try:
             # Flush telemetry to OTEL (JSONL) if export is enabled in session settings
             try:
@@ -926,7 +1018,7 @@ def _format_assistant_text(text: str, width: int = 80) -> str:
 
 
 def _print_prompt_menu(dim: str, reset: str, status: Optional[Dict[str, Any]] = None) -> None:
-    base = f"{dim}Send ↵  •  /status  •  /compact  •  Quit Ctrl+C{reset}" if dim or reset else "Send ↵  •  /status  •  /compact  •  Quit Ctrl+C"
+    base = f"{dim}Send ↵  •  ↑↓ History  •  ←→ Edit  •  /status  •  /compact  •  ESC Interrupt  •  Quit Ctrl+C{reset}" if dim or reset else "Send ↵  •  ↑↓ History  •  ←→ Edit  •  /status  •  /compact  •  ESC Interrupt  •  Quit Ctrl+C"
     print(base)
     if not status:
         return
